@@ -146,9 +146,21 @@ async function handleChatCompletion(
   let attempts = 0;
   let upstreamLatencyMs: number | undefined;
 
-  /** Emit exactly one structured access-log line per request. */
-  const logAccess = (status: number, extra: Record<string, unknown> = {}): void => {
-    const level = status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info';
+  /**
+   * Emit exactly one structured access-log line per request.
+   *
+   * The level is normally derived from the HTTP status, but callers may force
+   * it. A stream that dies mid-flight has already sent `200 OK`, so status
+   * alone would file a truncated response as a success and hide a real
+   * upstream failure from dashboards and alerts.
+   */
+  const logAccess = (
+    status: number,
+    extra: Record<string, unknown> = {},
+    levelOverride?: 'info' | 'warn' | 'error',
+  ): void => {
+    const level =
+      levelOverride ?? (status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info');
     logger[level]('chat_completion', {
       requestId: request.id,
       method: request.method,
@@ -214,12 +226,18 @@ async function handleChatCompletion(
         // The stream broke mid-flight. Headers are already sent, so an error
         // body is impossible; end the response and record it.
         reply.raw.end();
-        logAccess(result.status, {
-          stream: true,
-          bytes,
-          error: err instanceof Error ? err.message : String(err),
-          truncated: true,
-        });
+        logAccess(
+          result.status,
+          {
+            stream: true,
+            bytes,
+            error: err instanceof Error ? err.message : String(err),
+            truncated: true,
+          },
+          // The client received a partial, silently-incomplete completion.
+          // That is a failure even though the status line said 200.
+          'error',
+        );
       }
       return;
     }

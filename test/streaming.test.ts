@@ -102,6 +102,40 @@ describe('streaming', () => {
     await reader.cancel();
   });
 
+  it('logs a mid-stream upstream failure at error level, not info', async () => {
+    // The response already sent `200 OK` before the upstream died, so deriving
+    // the log level from the status alone would file a truncated completion as
+    // a success and hide a real failure from dashboards.
+    stub = await StubUpstream.start((_req, respond) => {
+      respond.abortMidStream([SSE_CHUNKS[0]!, SSE_CHUNKS[1]!]);
+    });
+    const test = buildTestApp({ baseUrl: stub.baseUrl });
+    app = test.app;
+    await app.listen({ port: 0, host: '127.0.0.1' });
+
+    const address = app.server.address() as { port: number };
+    const res = await fetch(`http://127.0.0.1:${address.port}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(STREAM_REQUEST),
+    });
+
+    let received = '';
+    try {
+      for await (const chunk of res.body!) received += new TextDecoder().decode(chunk);
+    } catch {
+      // A transport-level error here is acceptable; the assertion is on logging.
+    }
+
+    // The client got partial output and no terminator, so it can detect this.
+    expect(received).toContain('Hello');
+    expect(received).not.toContain('[DONE]');
+
+    const access = test.logs.find((l) => l['message'] === 'chat_completion');
+    expect(access?.['truncated']).toBe(true);
+    expect(access?.['level']).toBe('error');
+  });
+
   it('returns a JSON error body when a streaming request fails upstream', async () => {
     // Even with stream: true, an upstream error arrives as JSON. The client
     // needs a parseable error, not an empty event stream.

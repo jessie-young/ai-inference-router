@@ -12,6 +12,8 @@ export interface StubResponder {
   json(status: number, body: unknown): void;
   text(status: number, body: string, contentType?: string): void;
   sse(chunks: string[], delayMs?: number): Promise<void>;
+  /** Send some frames, then destroy the socket without terminating the stream. */
+  abortMidStream(chunks: string[]): void;
   hang(): void;
 }
 
@@ -78,6 +80,16 @@ export class StubUpstream {
               if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
             }
             res.end();
+          },
+          abortMidStream(sseChunks) {
+            res.writeHead(200, {
+              'content-type': 'text/event-stream',
+              'cache-control': 'no-cache',
+            });
+            for (const chunk of sseChunks) res.write(chunk);
+            // Kill the connection with no [DONE] sentinel, simulating a
+            // provider that dies partway through generating.
+            setTimeout(() => res.socket?.destroy(), 20);
           },
           hang() {
             // Deliberately never respond, to exercise the client timeout.
