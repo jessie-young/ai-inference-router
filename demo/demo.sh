@@ -217,6 +217,14 @@ cmd "node demo/verify-streaming.mjs --self"
 note "  It asserts the partial content survives, [DONE] is absent so the client"
 note "  can detect truncation, the router stays up, and the request is logged at"
 note "  error level despite the status already being 200."
+echo
+note "${BOLD}All of this is testable with plain curl too${RESET} — no webapp needed:"
+cmd "curl -sN --trace-time --trace-ascii /dev/stdout ... | grep 'Recv data'"
+note "  curl timestamps each receive, so separate arrival times prove streaming."
+cmd "curl -sN ... | head -3          # client hangs up mid-stream"
+cmd "curl -sN --max-time 1 ...       # exit code 28 = we hung up"
+note "See demo/README.md, \"Testing streaming with curl alone\", for all four"
+note "recipes including truncation detection."
 pause
 
 hdr "8. Token counting (extension C)"

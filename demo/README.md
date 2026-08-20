@@ -186,6 +186,152 @@ curl http://localhost:8080/v1/chat/completions \
 ```
 Replies `Tokyo` — history and system prompts survive the hop.
 
+### Testing streaming with curl alone
+
+You do **not** need a webapp, an SSE client library, or anything persistent.
+`curl` handles every streaming case, including both mid-stream failures. The
+only flag that really matters is `-N` (`--no-buffer`), which stops curl from
+buffering the response before printing it — without it, output looks batched
+even when the router is streaming perfectly.
+
+#### 1. Watch tokens arrive live
+
+```bash
+curl -N http://localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "router/mistral-small",
+    "messages": [{"role": "user", "content": "Count from 1 to 20."}],
+    "stream": true
+  }'
+```
+
+Frames scroll as they are generated, ending with `data: [DONE]`.
+
+#### 2. Prove it is real-time, not buffered
+
+Watching text appear is suggestive but not proof — a fast enough buffered
+response looks the same. `--trace-time` makes curl timestamp every receive
+itself, so the evidence is curl's, not ours:
+
+```bash
+curl -sN --trace-time --trace-ascii /dev/stdout \
+  http://localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"router/mistral-small","messages":[{"role":"user","content":"Count 1 to 10."}],"stream":true}' \
+  2>/dev/null | grep "Recv data"
+```
+
+```
+10:19:36.607975 <= Recv data, 31 bytes (0x1f)
+10:19:36.620560 <= Recv data, 292 bytes (0x124)
+10:19:36.648547 <= Recv data, 292 bytes (0x124)
+10:19:36.659202 <= Recv data, 291 bytes (0x123)
+10:19:36.680477 <= Recv data, 292 bytes (0x124)
+```
+
+**Distinct timestamps across separate receives is the proof.** A buffering proxy
+would show every byte arriving in one burst at the end.
+
+For elapsed-time deltas instead of wall-clock, pipe through Python (no extra
+tools to install, and `date +%N` does not work on macOS):
+
+```bash
+curl -sN http://localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"router/mistral-small","messages":[{"role":"user","content":"Count 1 to 10."}],"stream":true}' \
+| python3 -u -c '
+import sys, time
+start = time.time()
+try:
+    for line in sys.stdin:
+        if line.startswith("data: "):
+            print(f"+{(time.time()-start)*1000:7.0f}ms  {line[6:50].strip()}")
+except BrokenPipeError:
+    pass          # tolerate being piped into head
+'
+```
+```
++    477ms  {"id":"gen-...","object":"chat.completion.chunk"
++    507ms  {"id":"gen-...","object":"chat.completion.chunk"
++    538ms  {"id":"gen-...","object":"chat.completion.chunk"
++    694ms  [DONE]
+```
+
+The first number is time-to-first-token — the model thinking. What proves
+streaming is that the *later* numbers keep climbing.
+
+#### 3. Client disconnects mid-stream
+
+Two ways to hang up on purpose. Either should leave the router healthy:
+
+```bash
+# (a) close the pipe early — curl dies of SIGPIPE
+curl -sN http://localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"router/mistral-small","messages":[{"role":"user","content":"Write a long paragraph."}],"stream":true,"max_tokens":300}' \
+  | head -3
+
+# (b) give curl a deadline it will hit mid-stream
+curl -sN --max-time 1 http://localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"router/mistral-small","messages":[{"role":"user","content":"Write a long story."}],"stream":true,"max_tokens":400}'
+# curl exit code 28 = timeout, i.e. we hung up first
+
+# then confirm the router is unharmed
+curl -s http://localhost:8080/health
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"router/gemma4","messages":[{"role":"user","content":"hi"}]}'
+```
+
+Both should print `200` — the router closed its upstream side and moved on.
+
+Run these against a **live** upstream, not the mock: the mock replies in
+milliseconds, so `--max-time 1` never fires and curl exits `0` instead of `28`.
+
+#### 4. Upstream dies mid-stream
+
+A real provider will not fail on command, so use the mock upstream:
+
+```bash
+node demo/mock-upstream.mjs &
+MOCK_API_KEY=demo CONFIG_PATH=demo/config.demo.yaml npm start
+
+curl -N http://localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"demo/truncated-stream","messages":[{"role":"user","content":"hi"}],"stream":true}'
+```
+
+```
+data: {"id":"mock",...,"delta":{"content":"Par"}}
+
+data: {"id":"mock",...,"delta":{"content":"tial"}}
+
+```
+
+**The subtlety worth pointing out in a demo:** curl exits `0` and the status was
+`200`, because headers were sent before the upstream died. Nothing in the HTTP
+layer reports a problem. The *only* client-visible signal is the missing
+`data: [DONE]` — which is exactly why that sentinel matters:
+
+```bash
+curl -sN http://localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"demo/truncated-stream","messages":[{"role":"user","content":"hi"}],"stream":true}' \
+  | grep -q '\[DONE\]' && echo "complete" || echo "TRUNCATED"
+```
+
+On the server side it is not silent: the router logs that request at
+`level: "error"` with `truncated: true`, despite the 200.
+
+#### When curl is not enough
+
+Only for the automated assertions. `demo/verify-streaming.mjs` exists because a
+script can *assert* on chunk timings and fail CI; curl shows you the same
+evidence but cannot decide whether it passed. Use curl to demo and explore, the
+verifier to gate.
+
 ### Verifying streaming actually streams (extension A)
 
 Printing SSE frames does **not** prove real-time delivery: a proxy that buffered

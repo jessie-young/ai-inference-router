@@ -229,7 +229,30 @@ possible — instead the partial content is preserved, the stream ends without a
 at `error` level with `truncated: true` rather than looking like a success.
 
 **Verifying it:** printing SSE frames does not prove real-time delivery, since a
-buffering proxy emits identical bytes. Only timing separates them:
+buffering proxy emits identical bytes. Only timing separates them.
+
+`curl` alone is enough to check every case — no webapp or SSE client needed.
+`--trace-time` makes curl timestamp each receive itself:
+
+```bash
+curl -sN --trace-time --trace-ascii /dev/stdout \
+  http://localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"router/mistral-small","messages":[{"role":"user","content":"Count 1 to 10."}],"stream":true}' \
+  2>/dev/null | grep "Recv data"
+```
+```
+10:19:36.607975 <= Recv data, 31 bytes (0x1f)
+10:19:36.620560 <= Recv data, 292 bytes (0x124)
+10:19:36.648547 <= Recv data, 292 bytes (0x124)
+```
+
+Distinct timestamps across separate receives is the proof; a buffering proxy
+would deliver everything in one burst. See
+[demo/README.md](demo/README.md#testing-streaming-with-curl-alone) for the
+disconnect and truncation cases with curl.
+
+For automated assertions that can fail CI:
 
 ```bash
 node demo/verify-streaming.mjs          # against a live upstream
