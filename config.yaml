@@ -1,0 +1,47 @@
+# AI Inference Router — upstream configuration
+#
+# Each entry under `upstreams` defines a backend the router can forward to.
+# Each entry under `models` maps a client-facing alias to an upstream + the
+# model identifier that upstream expects.
+#
+# API keys are NEVER written here. `api_key_env` names an environment variable
+# that must be set when the router boots; the router fails fast if it is missing.
+
+upstreams:
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    # Optional per-upstream tuning. Values shown are the defaults.
+    timeout_ms: 120000
+    max_retries: 2
+    # Extra headers sent to this upstream. OpenRouter uses these for
+    # attribution on their dashboard; they are optional.
+    headers:
+      HTTP-Referer: https://github.com/jessie-young/ai-inference-router
+      X-Title: AI Inference Router
+
+models:
+  router/gemma4:
+    upstream: openrouter
+    model: google/gemma-4-26b-a4b-it
+
+  router/nemotron3:
+    upstream: openrouter
+    model: nvidia/nemotron-3-nano-30b-a3b
+
+  router/mistral-small:
+    upstream: openrouter
+    model: mistralai/mistral-small-2603
+
+# Adding another provider is purely additive — no code changes:
+#
+# upstreams:
+#   local-vllm:
+#     base_url: http://localhost:8000/v1
+#     api_key_env: VLLM_API_KEY
+#     timeout_ms: 300000
+#
+# models:
+#   router/local-llama:
+#     upstream: local-vllm
+#     model: meta-llama/Llama-3.1-8B-Instruct
