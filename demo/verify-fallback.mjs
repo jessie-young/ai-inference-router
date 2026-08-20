@@ -29,6 +29,7 @@ const check = (label, ok, detail = '') => {
 /** An upstream that records every request and answers however we tell it to. */
 async function startUpstream(name) {
   const requests = [];
+  const stubRef = {};
   let responder = (_body, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(completion(name)));
@@ -41,17 +42,21 @@ async function startUpstream(name) {
       let body = {};
       try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch {}
       requests.push(body);
+      if (stubRef.journal) {
+        stubRef.journal.push({ target: name, model: body.model, at: Date.now() });
+      }
       responder(body, res);
     });
   });
   await new Promise((res) => server.listen(0, '127.0.0.1', res));
 
-  return {
+  Object.assign(stubRef, {
     name, server, requests,
     url: `http://127.0.0.1:${server.address().port}/v1`,
     set(fn) { responder = fn; },
     reset() { requests.length = 0; },
-  };
+  });
+  return stubRef;
 }
 
 const completion = (who) => ({
@@ -74,6 +79,19 @@ const { createLogger } = await import('../dist/observability/logger.js');
 
 const primary = await startUpstream('primary');
 const secondary = await startUpstream('secondary');
+const tertiary = await startUpstream('tertiary');
+
+/**
+ * A shared, ordered record of which upstream was called and when.
+ *
+ * Per-server request counts cannot prove ORDER: with two targets, "tried in
+ * sequence" and "tried in reverse" can both end with the same server serving
+ * the request. One global journal across three targets can.
+ */
+const journal = [];
+for (const stub of [primary, secondary, tertiary]) {
+  stub.journal = journal;
+}
 
 const logs = [];
 const mkUpstream = (name, url) => [name, {
@@ -86,6 +104,7 @@ const app = buildApp({
     upstreams: new Map([
       mkUpstream('primary', primary.url),
       mkUpstream('secondary', secondary.url),
+      mkUpstream('tertiary', tertiary.url),
       mkUpstream('dead', 'http://127.0.0.1:9099/v1'),
     ]),
     models: new Map([
@@ -96,6 +115,11 @@ const app = buildApp({
       ['router/chain-dead-primary', { targets: [
         { upstream: 'dead', model: 'vendor/model:free' },
         { upstream: 'secondary', model: 'vendor/model' },
+      ]}],
+      ['router/chain3', { targets: [
+        { upstream: 'primary', model: 'vendor/tier-1' },
+        { upstream: 'secondary', model: 'vendor/tier-2' },
+        { upstream: 'tertiary', model: 'vendor/tier-3' },
       ]}],
     ]),
   },
@@ -112,7 +136,10 @@ const ask = async (model = 'router/chain') => {
   return { status: res.status, body: await res.json() };
 };
 
-const reset = () => { primary.reset(); secondary.reset(); logs.length = 0; };
+const reset = () => {
+  primary.reset(); secondary.reset(); tertiary.reset();
+  journal.length = 0; logs.length = 0;
+};
 const servedBy = (body) => body?.choices?.[0]?.message?.content ?? '(error)';
 
 console.log(b('Fallback chain verification'));
@@ -226,9 +253,90 @@ reset();
     !Object.keys(usage.byModel).some((k) => k.startsWith('vendor/')));
 }
 
+// ── 8. Order: a 3-hop chain is walked in sequence ──
+console.log(b('\n8. Three-hop chain → tried in ORDER, one at a time'));
+console.log(d('   Two targets cannot prove ordering: "in sequence" and "in reverse"'));
+console.log(d('   can both end with the same server answering. Three can.\n'));
+reset();
+{
+  primary.set(respondWith(503, { error: { message: 'tier-1 down' } }));
+  secondary.set(respondWith(503, { error: { message: 'tier-2 down' } }));
+  tertiary.set((_b3, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(completion('tertiary')));
+  });
+
+  const t0 = Date.now();
+  const { status, body } = await ask('router/chain3');
+
+  console.log(d('   call journal (the actual sequence of upstream calls):'));
+  for (const [i, e] of journal.entries()) {
+    console.log(d(`     ${i + 1}. +${String(e.at - t0).padStart(4)}ms  ${e.target.padEnd(10)} model=${e.model}`));
+  }
+  console.log();
+
+  check('client got 200', status === 200, `got ${status}`);
+  check('the THIRD target served it', servedBy(body).includes('tertiary'), servedBy(body));
+  check('all three were called', journal.length === 3, `${journal.length} calls`);
+  check('called in configured order: primary → secondary → tertiary',
+    journal.map((e) => e.target).join(' → ') === 'primary → secondary → tertiary',
+    journal.map((e) => e.target).join(' → '));
+  check('each hop got ITS OWN model id, not the primary\'s',
+    journal.map((e) => e.model).join(',') === 'vendor/tier-1,vendor/tier-2,vendor/tier-3',
+    journal.map((e) => e.model).join(','));
+
+  const access = logs.find((l) => l.message === 'chat_completion');
+  check('access log records all three hops in order',
+    JSON.stringify(access?.chainAttempts?.map((a) => a.upstream)) ===
+      JSON.stringify(['primary', 'secondary', 'tertiary']),
+    JSON.stringify(access?.chainAttempts?.map((a) => a.upstream)));
+  check('access log attributes the request to the hop that served it',
+    access?.upstream === 'tertiary', access?.upstream);
+}
+
+// ── 9. Stops at the first success ──
+console.log(b('\n9. Stops at the first success — later targets untouched'));
+console.log(d('   A chain that kept walking would double-bill every request.'));
+reset();
+{
+  primary.set(respondWith(429, { error: { message: 'tier-1 busy' } }));
+  secondary.set((_b4, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(completion('secondary')));
+  });
+  tertiary.set(respondWith(200, completion('tertiary')));
+
+  const { body } = await ask('router/chain3');
+  console.log(d(`   call journal: ${journal.map((e) => e.target).join(' → ')}`));
+
+  check('the SECOND target served it', servedBy(body).includes('secondary'), servedBy(body));
+  check('exactly 2 calls were made', journal.length === 2, `${journal.length}`);
+  check('the third target was NEVER called',
+    !journal.some((e) => e.target === 'tertiary'),
+    'it was called — that is wasted spend on every request');
+}
+
+// ── 10. Healthy primary short-circuits the whole chain ──
+console.log(b('\n10. Healthy primary → chain never advances'));
+reset();
+{
+  primary.set(respondWith(200, completion('primary')));
+  secondary.set(respondWith(200, completion('secondary')));
+  tertiary.set(respondWith(200, completion('tertiary')));
+
+  const { body } = await ask('router/chain3');
+  console.log(d(`   call journal: ${journal.map((e) => e.target).join(' → ')}`));
+
+  check('served by the primary', servedBy(body).includes('primary'), servedBy(body));
+  check('exactly 1 call was made', journal.length === 1, `${journal.length}`);
+  const failovers = logs.filter((l) => l.message === 'upstream_failover');
+  check('no failover was logged', failovers.length === 0, `${failovers.length} logged`);
+}
+
 await app.close();
 primary.server.close();
 secondary.server.close();
+tertiary.server.close();
 
 console.log(b(`\n${passed} passed, ${failed} failed\n`));
 process.exit(failed > 0 ? 1 : 0);

@@ -74,7 +74,7 @@ npm start                 # terminal 1
 | `npm run dev` | Start with hot reload |
 | `npm run build` | Compile TypeScript to `dist/` |
 | `npm start` | Run the compiled build |
-| `npm test` | Run the test suite (102 tests, no network required) |
+| `npm test` | Run the test suite (109 tests, no network required) |
 | `npm run type-check` | Type-check without emitting |
 
 ## Configuration
@@ -302,9 +302,26 @@ engages returns 200 too. The evidence is which upstream received the request:
 node demo/verify-fallback.mjs   # two independent upstreams, no API key
 ```
 
-It asserts each upstream's request count across seven scenarios, including that
-a healthy primary leaves the fallback untouched and that a genuinely malformed
-request does not walk the chain.
+It runs a **three**-hop chain — two targets cannot prove ordering, since "in
+sequence" and "in reverse" can both end with the same server answering — and
+prints the actual call journal:
+
+```
+   call journal (the actual sequence of upstream calls):
+     1. +   1ms  primary    model=vendor/tier-1
+     2. +   1ms  secondary  model=vendor/tier-2
+     3. +   2ms  tertiary   model=vendor/tier-3
+```
+
+Across ten scenarios it asserts the order is exactly as configured, that each
+hop receives **its own** model id rather than the primary's, that the walk stops
+at the first success, that a healthy primary leaves later targets untouched, and
+that a genuinely malformed request does not walk the chain at all.
+
+These assertions were themselves checked by deliberately breaking the router —
+reversing the chain, continuing past a success, reusing the primary's model id,
+and fanning out in parallel — and confirming the corresponding tests failed each
+time. See [demo/README.md](demo/README.md#how-do-you-know-it-fell-back-to-the-correct-model).
 
 ### C. Token counting
 
@@ -396,7 +413,7 @@ Everything else in the request path is transport.
 ## Testing
 
 ```bash
-npm test                                # 102 tests
+npm test                                # 109 tests
 node demo/verify-streaming.mjs --self   # streaming, end to end
 node demo/verify-fallback.mjs           # fallback chains, end to end
 ```

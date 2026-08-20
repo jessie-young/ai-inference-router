@@ -419,6 +419,80 @@ Self-contained, no API key. Against live OpenRouter you generally will *not* see
 a failover, because the `:free` tier works — to force one there, use the
 dead-port config below.
 
+### How do you know it fell back to the *correct* model?
+
+"It returned 200" is not enough — a chain that never fired returns 200 too, and
+a chain that jumped straight to the last target looks the same from outside.
+Three independent records answer this, and they should agree.
+
+**1. The mock upstream's own log.** It prints every model id it is asked for,
+in arrival order — a record the router does not write:
+
+```bash
+node demo/mock-upstream.mjs        # terminal 1, watch this
+```
+```
+[mock] POST /v1/fail-402/chat/completions  model=mock/free-tier-model
+   → responding 402 (out of credit — like an exhausted :free tier)
+[mock] POST /v1/chat/completions            model=mock/paid-model
+   → responding 200 (success)
+```
+
+The free tier was tried **first** and the paid model **second**. That ordering
+is the mock's testimony, not ours.
+
+**2. The router's `chainAttempts` log.** Every hop, in order, with what each
+returned:
+
+```bash
+grep chat_completion router.log | tail -1 | python3 -m json.tool
+```
+```json
+{
+  "model": "demo/fallback-quota",
+  "upstreamModel": "mock/paid-model",
+  "failedOver": true,
+  "status": 200,
+  "chainAttempts": [
+    { "upstream": "mock-402", "model": "mock/free-tier-model", "status": 402 },
+    { "upstream": "mock",     "model": "mock/paid-model",      "status": 200 }
+  ]
+}
+```
+
+`upstreamModel` is the hop that actually served the request; `chainAttempts`
+shows the full walk.
+
+**3. The automated verifier.** `demo/verify-fallback.mjs` runs a **three**-hop
+chain and prints the call journal, because two targets cannot prove ordering —
+"in sequence" and "in reverse" can both end with the same server answering:
+
+```
+   call journal (the actual sequence of upstream calls):
+     1. +   1ms  primary    model=vendor/tier-1
+     2. +   1ms  secondary  model=vendor/tier-2
+     3. +   2ms  tertiary   model=vendor/tier-3
+```
+
+It asserts the order is exactly `primary → secondary → tertiary`, that each hop
+received **its own** model id rather than the primary's, and that a healthy
+primary means the later targets are never called at all.
+
+#### Confirming the tests would actually catch a bug
+
+Passing tests only mean something if they fail when the code is wrong. These
+were checked by deliberately breaking the router and confirming the right tests
+failed:
+
+| Bug introduced | Tests that caught it |
+|---|---|
+| Chain walked in reverse order | all 7 ordering tests |
+| Kept walking after a success | "stops at first success", "never calls when primary succeeds" |
+| Sent the primary's model id to every hop | "each hop gets its own model id" |
+| Fired all targets in parallel | "calls sequentially", "healthy primary", + 3 more |
+
+The source was restored afterwards; `git diff src/` is clean.
+
 ### Token counting (extension C)
 
 ```bash
