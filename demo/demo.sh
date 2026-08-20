@@ -396,8 +396,13 @@ if curl -sf "$BASE/v1/models" 2>/dev/null | grep -q "demo/fallback"; then
   note "${BOLD}A 200 alone does not prove the chain fired${RESET} — a chain that never"
   note "engages returns 200 too. The proof is WHICH upstream got the request:"
   cmd "node demo/verify-fallback.mjs"
-  note "It runs two independent upstreams and asserts each one's request count"
-  note "in every scenario, including that a malformed 400 does NOT advance."
+  note "It runs a three-hop chain and asserts the call ORDER, that each hop gets"
+  note "its own model id, and that a malformed 400 does NOT advance."
+  echo
+  note "To run these yourself and watch retry vs fallback side by side, see"
+  note "demo/README.md → \"Running the retry and fallback tests yourself\"."
+  note "Short version: retry repeats the SAME model (attempts>1); fallback moves"
+  note "to a DIFFERENT one (failedOver=true)."
 else
   note "${YELLOW}Demo config not loaded — skipping fallback simulation.${RESET}"
   note "Start the mock upstream and restart the router with the demo config"

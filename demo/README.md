@@ -425,6 +425,141 @@ Self-contained, no API key. Against live OpenRouter you generally will *not* see
 a failover, because the `:free` tier works — to force one there, use the
 dead-port config below.
 
+### Running the retry and fallback tests yourself
+
+Three ways, shortest first.
+
+#### Option 1 — one command, everything
+
+```bash
+./demo/run-mock-demo.sh
+```
+
+Runs every retry and fallback scenario and shuts down after. No API key.
+
+#### Option 2 — by hand, so you can poke at it
+
+Two servers, then curl whatever you like:
+
+```bash
+# Terminal 1 — the fake provider. Watch this: it shows every call it receives.
+node demo/mock-upstream.mjs
+
+# Terminal 2 — a router pointed at it (NOT plain `npm start`, which uses OpenRouter)
+MOCK_API_KEY=demo CONFIG_PATH=demo/config.demo.yaml npm start
+```
+
+**Retry** — one client request, three upstream calls to the *same* target:
+
+```bash
+curl -s -w '\nHTTP %{http_code}  |  %{time_total}s\n' \
+  localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"demo/flaky","messages":[{"role":"user","content":"hi"}]}'
+```
+
+The client sees a single `HTTP 200`. Terminal 1 tells the real story:
+
+```
+[mock 17:47:15.772] POST /v1/flaky/chat/completions  model=mock/flaky-model
+   → attempt 1: responding 503 (router should retry)
+[mock 17:47:15.985] POST /v1/flaky/chat/completions  model=mock/flaky-model
+   → attempt 2: responding 503 (router should retry)
+[mock 17:47:16.388] POST /v1/flaky/chat/completions  model=mock/flaky-model
+   → attempt 3: responding 200 (retry succeeded)
+```
+
+Note the gaps — ~213ms then ~403ms. That is exponential backoff with jitter,
+and the same model id every time.
+
+**Fallback** — one client request, two *different* targets:
+
+```bash
+curl -s -o /dev/null -w 'HTTP %{http_code}\n' \
+  localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"demo/fallback-quota","messages":[{"role":"user","content":"hi"}]}'
+```
+```
+[mock] POST /v1/fail-402/chat/completions  model=mock/free-tier-model
+   → responding 402 (out of credit — like an exhausted :free tier)
+[mock] POST /v1/chat/completions            model=mock/paid-model
+   → responding 200 (success)
+```
+
+**Telling the two apart in the router log:**
+
+```bash
+grep chat_completion router.log | tail -1 | python3 -m json.tool
+```
+
+| | `attempts` | model id | `failedOver` |
+|---|---|---|---|
+| **Retry** | 3 | same every time | `false` |
+| **Fallback** | 1 | different per hop | `true` |
+
+Retry re-attempts the *same* target for a blip. Fallback abandons a target for
+a failure retrying will not fix. `attempts` counts tries against one target;
+`chainAttempts` lists the hops.
+
+#### Option 3 — write your own chain
+
+Nothing is special about the shipped aliases. Point the router at your own file:
+
+```yaml
+# /tmp/mychain.yaml
+upstreams:
+  tier1:
+    base_url: http://127.0.0.1:9090/v1/fail-429   # always rate-limits
+    api_key_env: MOCK_API_KEY
+    max_retries: 2                                 # retry twice before moving on
+  tier2:
+    base_url: http://127.0.0.1:9090/v1/fail-402   # always out of credit
+    api_key_env: MOCK_API_KEY
+    max_retries: 0
+  tier3:
+    base_url: http://127.0.0.1:9090/v1            # healthy
+    api_key_env: MOCK_API_KEY
+    max_retries: 0
+
+models:
+  my/chain:
+    targets:
+      - { upstream: tier1, model: my/tier-1-model }
+      - { upstream: tier2, model: my/tier-2-model }
+      - { upstream: tier3, model: my/tier-3-model }
+```
+
+```bash
+MOCK_API_KEY=demo CONFIG_PATH=/tmp/mychain.yaml npm start
+
+curl -s -o /dev/null -w 'HTTP %{http_code}\n' localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"my/chain","messages":[{"role":"user","content":"hi"}]}'
+```
+
+One client request produces **five** upstream calls — both layers at once:
+
+```
+  1  /v1/fail-429/chat/completions  model=my/tier-1-model    ← try
+  2  /v1/fail-429/chat/completions  model=my/tier-1-model    ← retry
+  3  /v1/fail-429/chat/completions  model=my/tier-1-model    ← retry
+  4  /v1/fail-402/chat/completions  model=my/tier-2-model    ← chain advances
+  5  /v1/chat/completions           model=my/tier-3-model    ← success
+```
+
+Each target exhausts its own retries before the chain moves on. Change
+`max_retries` on `tier1` and the number of repeats in lines 1–3 changes with it.
+
+#### Option 4 — automated assertions
+
+```bash
+node demo/verify-fallback.mjs     # 38 assertions, three-hop ordering, no API key
+npm test                          # 109 tests, includes retry-then-advance ordering
+```
+
+Use these to gate CI; use options 1–3 to see it happen.
+
 ### How do you know it fell back to the *correct* model?
 
 "It returned 200" is not enough — a chain that never fired returns 200 too, and

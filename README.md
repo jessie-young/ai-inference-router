@@ -286,6 +286,19 @@ on a target entirely for a failure retrying will not fix — out of quota,
 provider down, credentials rejected. Each target exhausts its own retries before
 the chain advances.
 
+The two are distinguishable in the access log:
+
+| | `attempts` | model id | `failedOver` |
+|---|---|---|---|
+| Retry | >1 | same every time | `false` |
+| Fallback | 1 per hop | different per hop | `true` |
+
+To watch both happen, see
+[running the tests yourself](demo/README.md#running-the-retry-and-fallback-tests-yourself)
+— a chain whose first target has `max_retries: 2` produces five upstream calls
+for one client request: three against tier 1, then one each as the chain
+advances.
+
 **What triggers a failover:** 401, 402, 403, 404, 408, 429, and 5xx — plus
 network errors and timeouts. All are specific to one target.
 
