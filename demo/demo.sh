@@ -311,10 +311,13 @@ hdr "12. Simulating UPSTREAM failures"
 note "Real providers fail on their own schedule. To demo this deterministically"
 note "we point the router at a mock upstream that fails on command."
 echo
-note "In a second terminal:"
-cmd "node demo/mock-upstream.mjs"
-note "Then restart the router against the demo config:"
-cmd "MOCK_API_KEY=demo CONFIG_PATH=demo/config.demo.yaml npm start"
+note "Easiest — one command, starts both servers and tears them down:"
+cmd "./demo/run-mock-demo.sh"
+echo
+note "Or by hand, in two more terminals. Note the mock is a SERVER: it prints"
+note "nothing until a request reaches it, so its quiet startup banner is normal."
+cmd "node demo/mock-upstream.mjs                                    # terminal 2"
+cmd "MOCK_API_KEY=demo CONFIG_PATH=demo/config.demo.yaml npm start  # terminal 3"
 echo
 if curl -sf "$BASE/v1/models" 2>/dev/null | grep -q "demo/healthy"; then
   echo "${GREEN}Demo config detected — running the failure scenarios:${RESET}"

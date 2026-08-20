@@ -6,6 +6,12 @@ path on demand.
 
 **Fastest path:** [Quick start](#quick-start) → `./demo/demo.sh`.
 
+**Just want to see the failure handling?** One command, no API key, no setup:
+
+```bash
+./demo/run-mock-demo.sh
+```
+
 ---
 
 ## Quick start
@@ -752,17 +758,56 @@ Real providers fail on their own schedule, which is useless when demoing. The
 mock upstream fails **on command**, so every failure mode is reproducible and
 costs no credits.
 
-**Terminal 1 — mock provider:**
+#### The easy way: one command
+
+```bash
+./demo/run-mock-demo.sh
+```
+
+Starts the mock provider *and* a router pointed at it, runs every failure
+scenario, prints all three views side by side — what the client saw, what the
+mock actually received, what the router logged — then shuts both down. No API
+key, no external calls, no terminal juggling.
+
+```
+demo/fallback-quota  — primary out of credit (402) — the :free-tier case
+  client saw:   HTTP 200  ✓
+  mock received: 2 call(s)
+      →  /v1/fail-402/chat/completions  model=mock/free-tier-model
+      →  /v1/chat/completions           model=mock/paid-model
+  router log:   served_by=mock/paid-model  failedOver=True
+                  hop: mock/free-tier-model     -> 402
+                  hop: mock/paid-model          -> 200
+```
+
+#### The manual way: three terminals
+
+**The mock is a server — it prints nothing until something calls it.** Seeing
+only the startup banner is correct; it means it is waiting. Traffic appears
+once *both* of the next two steps are running.
+
+**Terminal 1 — mock provider.** Leave it visible; this is where you watch which
+targets get hit:
 ```bash
 node demo/mock-upstream.mjs
 ```
+```
+Mock upstream listening on http://127.0.0.1:9090
+Failure modes: /fail-500 /fail-429 /fail-402 /fail-401 /fail-400
+               /timeout /garbage /flaky /truncate
 
-**Terminal 2 — router pointed at the mock:**
+This is a server: it stays quiet until something calls it.
+...
+Waiting for requests…
+```
+
+**Terminal 2 — a router pointed at the mock.** Without this, nothing routes to
+the mock at all — the ordinary `npm start` talks to OpenRouter instead:
 ```bash
 MOCK_API_KEY=demo-key CONFIG_PATH=demo/config.demo.yaml npm start
 ```
 
-**Terminal 3 — trigger each failure:**
+**Terminal 3 — trigger each failure.** Only now does Terminal 1 come alive:
 
 ```bash
 fail() {
@@ -896,3 +941,5 @@ correct key: 200
 | Fallback never triggers on live OpenRouter | Expected — the `:free` tier is working. Force one with the dead-port config above, or use the mock. |
 | `/v1/usage` shows zeroes | Counters are in-process and reset on restart; they only count responses that reported usage. |
 | Demo says "Demo config not loaded" | Same as above — expected when running against live OpenRouter. |
+| Mock upstream prints nothing after startup | Working as intended: it is a server waiting for calls. You still need Terminal 2 (a router with `CONFIG_PATH=demo/config.demo.yaml`) and Terminal 3 (a curl). Or just run `./demo/run-mock-demo.sh`. |
+| `demo/*` request hangs or 502s with the mock running | The router is probably not using the demo config. Check its startup line lists `demo/…` models. |

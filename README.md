@@ -67,6 +67,14 @@ npm start                 # terminal 1
 ./demo/demo.sh            # terminal 2
 ```
 
+To see error handling, retries, and fallback chains without an API key, one
+command starts a mock provider plus a router, runs every failure scenario, and
+tears both down:
+
+```bash
+./demo/run-mock-demo.sh
+```
+
 ## Commands
 
 | Command | What it does |
