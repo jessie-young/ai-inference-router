@@ -55,6 +55,18 @@ const response = await client.chat.completions.create({
 });
 ```
 
+## Demo
+
+A complete guided walkthrough — live calls, streaming, routing verification,
+and on-demand error simulation — lives in **[`demo/README.md`](demo/README.md)**.
+
+```bash
+set -a; . ./.env; set +a
+npm start                 # terminal 1
+
+./demo/demo.sh            # terminal 2
+```
+
 ## Commands
 
 | Command | What it does |

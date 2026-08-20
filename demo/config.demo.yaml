@@ -1,0 +1,100 @@
+# Demo configuration — routes to the local mock upstream instead of OpenRouter.
+#
+# Use this to demonstrate error handling and retries deterministically, without
+# spending real credits or waiting for a provider to fail on its own schedule.
+#
+#   node demo/mock-upstream.mjs &
+#   MOCK_API_KEY=any-value CONFIG_PATH=demo/config.demo.yaml npm start
+#
+# Each alias below points at a mock endpoint that reproduces one failure mode.
+
+upstreams:
+  # Normal, healthy upstream.
+  mock:
+    base_url: http://127.0.0.1:9090/v1
+    api_key_env: MOCK_API_KEY
+    timeout_ms: 120000
+    max_retries: 0
+
+  # Same server, but a short timeout so the /timeout route trips it in 2s
+  # rather than making the demo audience wait two minutes.
+  mock-impatient:
+    base_url: http://127.0.0.1:9090/v1/timeout
+    api_key_env: MOCK_API_KEY
+    timeout_ms: 2000
+    max_retries: 0
+
+  # Retries enabled, pointed at the flaky route: fails twice, then succeeds.
+  mock-flaky:
+    base_url: http://127.0.0.1:9090/v1/flaky
+    api_key_env: MOCK_API_KEY
+    timeout_ms: 10000
+    max_retries: 3
+
+  mock-500:
+    base_url: http://127.0.0.1:9090/v1/fail-500
+    api_key_env: MOCK_API_KEY
+    max_retries: 0
+
+  mock-429:
+    base_url: http://127.0.0.1:9090/v1/fail-429
+    api_key_env: MOCK_API_KEY
+    max_retries: 0
+
+  mock-401:
+    base_url: http://127.0.0.1:9090/v1/fail-401
+    api_key_env: MOCK_API_KEY
+    max_retries: 0
+
+  mock-garbage:
+    base_url: http://127.0.0.1:9090/v1/garbage
+    api_key_env: MOCK_API_KEY
+    max_retries: 0
+
+  mock-truncate:
+    base_url: http://127.0.0.1:9090/v1/truncate
+    api_key_env: MOCK_API_KEY
+    max_retries: 0
+
+  # An address nothing is listening on, to demo an unreachable upstream.
+  mock-dead:
+    base_url: http://127.0.0.1:9099/v1
+    api_key_env: MOCK_API_KEY
+    max_retries: 0
+
+models:
+  demo/healthy:
+    upstream: mock
+    model: mock/healthy-model
+
+  demo/timeout:
+    upstream: mock-impatient
+    model: mock/slow-model
+
+  demo/flaky:
+    upstream: mock-flaky
+    model: mock/flaky-model
+
+  demo/error-500:
+    upstream: mock-500
+    model: mock/broken-model
+
+  demo/rate-limited:
+    upstream: mock-429
+    model: mock/busy-model
+
+  demo/bad-credentials:
+    upstream: mock-401
+    model: mock/auth-model
+
+  demo/garbage-response:
+    upstream: mock-garbage
+    model: mock/garbage-model
+
+  demo/truncated-stream:
+    upstream: mock-truncate
+    model: mock/truncating-model
+
+  demo/unreachable:
+    upstream: mock-dead
+    model: mock/offline-model
