@@ -212,15 +212,21 @@ A test asserts that no API key ever reaches the logs.
 
 ## Extensions implemented
 
-All three optional extensions, plus a few smaller additions.
+All three Part 2 extensions — **A. Streaming**, **B. Fallback chains**, and
+**C. Token counting** — plus a few smaller additions.
 
 ### A. Streaming
 
-`stream: true` returns Server-Sent Events, relayed as they arrive rather than
-buffered. Backpressure is respected, so a slow client cannot make chunks pile up
-in memory. A stream that dies mid-flight ends cleanly without a `[DONE]`
-sentinel — which is how a client detects truncation — and is logged at `error`
-level with `truncated: true`, even though the HTTP status was already `200`.
+`stream: true` is forwarded upstream with streaming enabled, and SSE chunks are
+relayed to the caller as they arrive rather than buffered. Backpressure is
+respected, so a slow client cannot make chunks pile up in memory.
+
+Mid-stream failures are handled on both sides. If the **client** disconnects,
+the router closes its upstream side and stays healthy. If the **upstream** dies
+mid-flight, the response has already sent `200 OK`, so no error body is
+possible — instead the partial content is preserved, the stream ends without a
+`[DONE]` sentinel (which is how a client detects truncation), and it is logged
+at `error` level with `truncated: true` rather than looking like a success.
 
 **Verifying it:** printing SSE frames does not prove real-time delivery, since a
 buffering proxy emits identical bytes. Only timing separates them:

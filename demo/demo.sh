@@ -82,8 +82,8 @@ curl -s "$BASE/v1/models" | pp
 pause
 
 hdr "3. A basic chat completion (non-streaming)"
-note "Standard OpenAI Chat Completions request with stream:false — the mode"
-note "the core requirement targets. One JSON response, no SSE."
+note "Standard OpenAI Chat Completions request with stream:false."
+note "One JSON response, no SSE. Streaming is section 7."
 cmd "curl $BASE/v1/chat/completions -d '{\"model\":\"router/gemma4\",...,\"stream\":false}'"
 curl -s "$BASE/v1/chat/completions" -H 'content-type: application/json' \
   -d '{"model":"router/gemma4","messages":[{"role":"user","content":"Say hello in exactly 5 words."}],"stream":false,"max_tokens":40}' \
@@ -150,7 +150,7 @@ note "Gemma reports Google, Mistral reports Mistral AI, and Nemotron's distinct"
 note "response structure is itself a fingerprint. Three aliases, three backends."
 echo
 echo "${BOLD}(c) Strongest: the raw SSE stream from OpenRouter${RESET}"
-note "${DIM}(This one uses streaming — an extension beyond the required scope.)${RESET}"
+note "${DIM}(This one uses streaming, covered in section 7.)${RESET}"
 note "We deliberately do NOT rewrite streaming chunks, so the model id inside"
 note "them comes straight from the provider — unfiltered by our code."
 for m in router/gemma4 router/nemotron3 router/mistral-small; do
@@ -185,7 +185,11 @@ note "way. Only an explicit true switches to SSE."
 pause
 
 hdr "7. Streaming (extension A)"
-note "stream:true returns Server-Sent Events, forwarded as they arrive."
+note "Three things this has to get right:"
+note "  1. forward upstream with streaming enabled"
+note "  2. relay SSE chunks to the caller in real time"
+note "  3. handle disconnects and mid-stream errors gracefully"
+echo
 cmd "curl -N $BASE/v1/chat/completions -d '{...,\"stream\":true}'"
 curl -sN "$BASE/v1/chat/completions" -H 'content-type: application/json' \
   -d '{"model":"router/mistral-small","messages":[{"role":"user","content":"Count from 1 to 5."}],"stream":true,"max_tokens":60}' \
@@ -202,10 +206,17 @@ else
   note "(demo/verify-streaming.mjs not found)"
 fi
 echo
-note "It also verifies a client hanging up mid-stream leaves the router healthy."
-note "For the upstream-dies-mid-stream case — which a real provider will not do"
-note "on command — run the self-contained mode (no API key needed):"
+note "That covers (1) and (2). For (3) there are two distinct failures:"
+echo
+note "  ${BOLD}Client disconnects${RESET} — checked in the run above: the router stays"
+note "  healthy and keeps serving after a caller hangs up mid-stream."
+echo
+note "  ${BOLD}Upstream dies mid-stream${RESET} — a real provider will not do this on"
+note "  command, so it needs the self-contained mode:"
 cmd "node demo/verify-streaming.mjs --self"
+note "  It asserts the partial content survives, [DONE] is absent so the client"
+note "  can detect truncation, the router stays up, and the request is logged at"
+note "  error level despite the status already being 200."
 pause
 
 hdr "8. Token counting (extension C)"

@@ -183,9 +183,9 @@ describe('POST /v1/chat/completions — happy path', () => {
 });
 
 describe('non-streaming is the default', () => {
-  // The spec this router was built against guarantees only that callers send
-  // `stream: false` or omit it. Those paths must return a plain JSON body,
-  // never SSE, for every spelling of "not streaming".
+  // Streaming is supported, but it must stay strictly opt-in: every spelling
+  // of "not streaming" has to return a plain JSON body, never SSE. A proxy
+  // that streamed by accident would break every non-streaming client.
   const NON_STREAMING_BODIES: Array<[string, Record<string, unknown>]> = [
     ['stream omitted', { model: 'router/gemma4', messages: REQUEST.messages }],
     ['stream: false', { model: 'router/gemma4', messages: REQUEST.messages, stream: false }],

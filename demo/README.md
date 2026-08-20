@@ -87,7 +87,7 @@ provider model names.
 
 ### A basic completion (non-streaming)
 
-This is the mode the core requirement targets — one JSON response, no SSE.
+One JSON response, no SSE. This is the default; streaming is covered below.
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \
@@ -134,9 +134,9 @@ done
 
 Only the `model` field changes. That is the router's whole value proposition.
 
-### Streaming (extension — beyond the required scope)
+### Streaming (extension A)
 
-The core requirement covers non-streaming only. Streaming is additive:
+Non-streaming is the default; `stream: true` returns Server-Sent Events:
 
 ```bash
 curl -N http://localhost:8080/v1/chat/completions \
