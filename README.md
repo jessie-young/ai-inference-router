@@ -222,6 +222,20 @@ in memory. A stream that dies mid-flight ends cleanly without a `[DONE]`
 sentinel — which is how a client detects truncation — and is logged at `error`
 level with `truncated: true`, even though the HTTP status was already `200`.
 
+**Verifying it:** printing SSE frames does not prove real-time delivery, since a
+buffering proxy emits identical bytes. Only timing separates them:
+
+```bash
+node demo/verify-streaming.mjs          # against a live upstream
+node demo/verify-streaming.mjs --self   # deterministic, no API key
+```
+
+This timestamps each chunk on arrival and asserts they are spread over time
+after the first lands — deliberately measuring the streaming phase rather than
+total latency, because time-to-first-token is the model thinking and says
+nothing about buffering. `--self` adds the upstream-dies-mid-stream case, which
+a real provider will not perform on command.
+
 ### B. Fallback chains
 
 A model alias can list an ordered set of targets. When one fails, the router
@@ -251,6 +265,17 @@ is exhausted and the final attempt is the most recent evidence of why.
 Failovers log an `upstream_failover` warning naming both endpoints, and the
 access line gains `failedOver: true` plus a `chainAttempts` array showing every
 hop and what it returned.
+
+**Verifying it:** a 200 does not prove the chain fired — a chain that never
+engages returns 200 too. The evidence is which upstream received the request:
+
+```bash
+node demo/verify-fallback.mjs   # two independent upstreams, no API key
+```
+
+It asserts each upstream's request count across seven scenarios, including that
+a healthy primary leaves the fallback untouched and that a genuinely malformed
+request does not walk the chain.
 
 ### C. Token counting
 
@@ -342,8 +367,14 @@ Everything else in the request path is transport.
 ## Testing
 
 ```bash
-npm test    # 102 tests
+npm test                                # 102 tests
+node demo/verify-streaming.mjs --self   # streaming, end to end
+node demo/verify-fallback.mjs           # fallback chains, end to end
 ```
+
+The two verifiers run the real server over real sockets and assert on
+observable behavior — chunk arrival times, which upstream got the request —
+rather than on internals. Both are self-contained: no API key, no network.
 
 The suite runs fully offline — no API key, no network — so it works in CI. Rather
 than mocking `fetch`, integration tests run a real HTTP server as a stub upstream,

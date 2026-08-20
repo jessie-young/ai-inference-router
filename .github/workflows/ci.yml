@@ -19,3 +19,6 @@ jobs:
       - run: npm run build
       # The suite runs fully offline: no API key or network access required.
       - run: npm test
+      # End-to-end verifiers over real sockets, also fully offline.
+      - run: node demo/verify-streaming.mjs --self
+      - run: node demo/verify-fallback.mjs

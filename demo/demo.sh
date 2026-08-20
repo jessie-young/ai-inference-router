@@ -132,11 +132,17 @@ for m in router/gemma4 router/nemotron3 router/mistral-small; do
     -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"Complete: 'I am a language model created by' — answer with ONLY the organization name.\"}],\"max_tokens\":30}" \
     | python3 -c "
 import sys, json
-d = json.load(sys.stdin)
-msg = d['choices'][0]['message']
-text = (msg.get('content') or msg.get('reasoning') or '').strip().replace(chr(10), ' ')
-tag = '  \033[2m[+reasoning field]\033[0m' if msg.get('reasoning') else ''
-print(f'\033[32m{text[:34]:<34}\033[0m{tag}')
+try:
+    d = json.load(sys.stdin)
+    if 'error' in d:
+        print('\033[2m(not available with this config: ' + str(d['error'].get('code')) + ')\033[0m')
+    else:
+        msg = d['choices'][0]['message']
+        text = (msg.get('content') or msg.get('reasoning') or '').strip().replace(chr(10), ' ')
+        tag = '  \033[2m[+reasoning field]\033[0m' if msg.get('reasoning') else ''
+        print(f'\033[32m{text[:34]:<34}\033[0m{tag}')
+except Exception:
+    print('\033[2m(no response)\033[0m')
 "
 done
 echo
@@ -178,7 +184,7 @@ note "explicit null is accepted too — some clients serialize unset fields that
 note "way. Only an explicit true switches to SSE."
 pause
 
-hdr "7. Streaming (extension, beyond the required scope)"
+hdr "7. Streaming (extension A)"
 note "stream:true returns Server-Sent Events, forwarded as they arrive."
 cmd "curl -N $BASE/v1/chat/completions -d '{...,\"stream\":true}'"
 curl -sN "$BASE/v1/chat/completions" -H 'content-type: application/json' \
@@ -186,7 +192,20 @@ curl -sN "$BASE/v1/chat/completions" -H 'content-type: application/json' \
   | head -6
 echo "  ${DIM}...${RESET}"
 echo
-note "Tokens arrive incrementally, ending with 'data: [DONE]'."
+note "${BOLD}Raw frames do not PROVE real-time delivery${RESET} — a proxy that buffered"
+note "the whole response would print identical bytes. Only timing separates"
+note "the two, so there is a tool that measures it:"
+cmd "node demo/verify-streaming.mjs"
+if [ -f demo/verify-streaming.mjs ]; then
+  node demo/verify-streaming.mjs 2>&1 | sed -n '/chunks over/,/content deltas/p' | sed 's/^/  /'
+else
+  note "(demo/verify-streaming.mjs not found)"
+fi
+echo
+note "It also verifies a client hanging up mid-stream leaves the router healthy."
+note "For the upstream-dies-mid-stream case — which a real provider will not do"
+note "on command — run the self-contained mode (no API key needed):"
+cmd "node demo/verify-streaming.mjs --self"
 pause
 
 hdr "8. Token counting (extension C)"
@@ -351,6 +370,12 @@ if curl -sf "$BASE/v1/models" 2>/dev/null | grep -q "demo/fallback"; then
   echo
   note "Watch the mock upstream's terminal: it shows which targets were hit."
   note "The router logs an 'upstream_failover' warning naming both endpoints."
+  echo
+  note "${BOLD}A 200 alone does not prove the chain fired${RESET} — a chain that never"
+  note "engages returns 200 too. The proof is WHICH upstream got the request:"
+  cmd "node demo/verify-fallback.mjs"
+  note "It runs two independent upstreams and asserts each one's request count"
+  note "in every scenario, including that a malformed 400 does NOT advance."
 else
   note "${YELLOW}Demo config not loaded — skipping fallback simulation.${RESET}"
   note "Start the mock upstream and restart the router with the demo config"

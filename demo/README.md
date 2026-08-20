@@ -186,6 +186,93 @@ curl http://localhost:8080/v1/chat/completions \
 ```
 Replies `Tokyo` — history and system prompts survive the hop.
 
+### Verifying streaming actually streams (extension A)
+
+Printing SSE frames does **not** prove real-time delivery: a proxy that buffered
+the entire response would emit byte-identical output. The only difference is
+*when* bytes arrive, so timing is the proof.
+
+```bash
+node demo/verify-streaming.mjs
+```
+
+It timestamps every chunk as it arrives and prints an arrival histogram:
+
+```
+   15 chunks over 969ms:
+     chunk  1  +  653ms  ████████████████████
+     chunk  2  +  658ms  █████████████████████
+     chunk  3  +  669ms  █████████████████████
+     ...
+   → time-to-first-token: 653ms  (the model thinking)
+   → streaming phase:     618ms across 60 chunks
+```
+
+**Reading this correctly matters.** Time-to-first-token is the model thinking
+before it emits anything, and on a live provider it is often most of the wall
+clock — it says nothing about buffering. What proves a live relay is that
+chunks are spread out *after* the first one lands. A buffering proxy would
+deliver every chunk at the same instant, at the very end.
+
+**Graceful mid-stream failure.** Two different failures matter, and only one can
+be demonstrated against a real provider:
+
+| Failure | How to test |
+|---|---|
+| Client hangs up mid-stream | Covered by the live run above |
+| Upstream dies mid-stream | Needs `--self` or the mock — a real provider will not fail on command |
+
+```bash
+node demo/verify-streaming.mjs --self
+```
+
+Self-contained: it spawns its own upstream with deliberate pacing and a
+truncating endpoint, so the timing assertions are deterministic. **No API key,
+no network, no cost** — this is also what runs in CI. It asserts that a
+truncated stream keeps its partial content, omits `[DONE]` so the client can
+detect the truncation, leaves the router healthy, and is logged at `error` level
+with `truncated: true` despite the HTTP status already being `200`.
+
+To watch a truncation by hand against the mock upstream:
+
+```bash
+node demo/mock-upstream.mjs &
+MOCK_API_KEY=demo CONFIG_PATH=demo/config.demo.yaml npm start
+
+curl -N http://localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"demo/truncated-stream","messages":[{"role":"user","content":"hi"}],"stream":true}'
+```
+
+Partial content arrives, then the stream simply stops — no `[DONE]`.
+
+### Verifying the fallback chain (extension B)
+
+The trap: **a 200 does not prove the chain fired.** A chain that never engages
+also returns 200. The only real evidence is *which upstream received the
+request*.
+
+```bash
+node demo/verify-fallback.mjs
+```
+
+It starts two independent upstreams and asserts each one's request count after
+every scenario — so a chain that silently failed to advance is caught:
+
+| Scenario | Asserted |
+|---|---|
+| Primary healthy | Secondary receives **zero** requests |
+| Primary 402 (out of credit) | Client gets 200, secondary served it, each hop got its own model id |
+| Primary unreachable | Chain advances, connection error is logged |
+| Primary rejects the model id (400) | Chain advances — that failure is target-specific |
+| Genuinely malformed request (400) | Chain does **not** advance — no wasted spend |
+| Every target fails | Client sees the *last* failure; `chainAttempts` records every hop |
+| Fallback served the request | Usage still counted against the alias |
+
+Self-contained, no API key. Against live OpenRouter you generally will *not* see
+a failover, because the `:free` tier works — to force one there, use the
+dead-port config below.
+
 ### Token counting (extension C)
 
 ```bash
