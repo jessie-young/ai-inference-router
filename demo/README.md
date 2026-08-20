@@ -186,6 +186,92 @@ curl http://localhost:8080/v1/chat/completions \
 ```
 Replies `Tokyo` — history and system prompts survive the hop.
 
+### Token counting (extension C)
+
+```bash
+curl http://localhost:8080/v1/usage
+```
+
+Cumulative prompt/completion tokens per alias since process start, sorted by
+spend. Generate some traffic first, then:
+
+```bash
+curl -s http://localhost:8080/v1/usage | python3 -m json.tool
+```
+```json
+{
+  "since": "2026-08-20T16:58:39.186Z",
+  "totals": { "requests": 4, "promptTokens": 65, "completionTokens": 25, "totalTokens": 90 },
+  "byModel": {
+    "router/nemotron3": { "requests": 1, "promptTokens": 21, "completionTokens": 20, "totalTokens": 41 },
+    "router/gemma4":    { "requests": 2, "promptTokens": 24, "completionTokens": 3,  "totalTokens": 27 }
+  }
+}
+```
+
+Counted against the **alias**, not the upstream model — with a fallback chain
+one alias may be served by several models, and the question is what the alias
+cost. Failed requests and responses that report no usage are not counted.
+
+### Fallback chains (extension B)
+
+`config.yaml` ships `router/gemma4` as a chain: the `:free` tier is tried first,
+with the paid model as backup.
+
+```yaml
+models:
+  router/gemma4:
+    targets:
+      - upstream: openrouter
+        model: google/gemma-4-26b-a4b-it:free
+      - upstream: openrouter
+        model: google/gemma-4-26b-a4b-it
+```
+
+Against live OpenRouter the `:free` tier usually works, so **you will not see a
+failover unless you force one**. To demo it deterministically, use the mock
+upstream (below) — or point a primary at a dead port:
+
+```bash
+cat > /tmp/fb.yaml <<'YAML'
+upstreams:
+  dead:
+    base_url: http://127.0.0.1:9099/v1
+    api_key_env: OPENROUTER_API_KEY
+    max_retries: 0
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    max_retries: 0
+models:
+  router/gemma4:
+    targets:
+      - upstream: dead
+        model: google/gemma-4-26b-a4b-it:free
+      - upstream: openrouter
+        model: google/gemma-4-26b-a4b-it
+YAML
+
+set -a; . ./.env; set +a
+CONFIG_PATH=/tmp/fb.yaml npm start
+```
+
+Then a normal request succeeds anyway:
+
+```bash
+curl -s http://localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"router/gemma4","messages":[{"role":"user","content":"Reply with exactly: OK"}]}'
+```
+
+The router log shows the hop:
+
+```json
+{"level":"warn","message":"upstream_failover","from":{"upstream":"dead"},"to":{"upstream":"openrouter"},"error":"Upstream \"dead\" is unreachable: fetch failed"}
+{"level":"info","message":"chat_completion","upstream":"openrouter","failedOver":true,"status":200,
+ "chainAttempts":[{"upstream":"dead","status":null},{"upstream":"openrouter","status":200}]}
+```
+
 ### The official OpenAI SDK
 
 ```bash
@@ -398,6 +484,25 @@ fail demo/timeout            # 504 — after 2s, rather than hanging
 | `demo/unreachable` | 502 | Connection refused |
 | `demo/timeout` | 504 | Bounded wait, not a hung client |
 
+**Fallback chains** (extension B) — the mock makes each case reproducible:
+
+```bash
+fail demo/fallback             # 200 — primary unreachable, fallback served it
+fail demo/fallback-quota       # 200 — primary out of credit (402), fallback served it
+fail demo/fallback-exhausted   # 500 — every target failed; last failure surfaced
+fail demo/fallback-badrequest  # 400 — malformed request does NOT walk the chain
+```
+
+| Alias | Result | What it demonstrates |
+|---|---|---|
+| `demo/fallback` | 200 | Unreachable primary → transparent failover |
+| `demo/fallback-quota` | 200 | 402 out-of-credit → the spec's motivating case |
+| `demo/fallback-exhausted` | 500 | All targets fail → *last* failure returned |
+| `demo/fallback-badrequest` | 400 | 400 is fatal — the next provider would reject it too |
+
+The mock's own terminal shows exactly which targets were hit, and the router
+logs an `upstream_failover` warning naming both endpoints.
+
 **Retry with backoff** — the mock fails twice, then succeeds:
 
 ```bash
@@ -455,16 +560,19 @@ correct key: 200
 5. **Prove the routing** (2m) — the log line, then the SSE stream carrying the provider's own model id. *This is the section that answers "how do you know it works?"*
 6. **Streaming** (1m) — `-N`, tokens arriving live.
 7. **The SDK** (1m) — `node demo/sdk-demo.mjs`. Official client, only `baseURL` changed, typed `NotFoundError`.
-8. **Errors** (2m) — unknown model 404 that lists valid aliases; then the mock upstream for 500/429/timeout/retry.
-9. **Observability** (1m) — the log terminal, and what you'd alert on. Mention keys and prompts are never logged.
+8. **Token counting** (1m) — `GET /v1/usage`, per-alias totals. Note it counts the alias, not the upstream model.
+9. **Errors** (2m) — unknown model 404 that lists valid aliases; then the mock upstream for 500/429/timeout/retry.
+10. **Fallback chains** (2m) — the four mock scenarios. The 400 case is the interesting one: it deliberately does *not* fail over.
+11. **Observability** (1m) — the log terminal, and what you'd alert on. Mention keys and prompts are never logged.
 
-**If you have less time:** sections 3, 5, and 8 carry the most weight — it works, here's proof it routes correctly, here's how it fails.
+**If you have less time:** sections 3, 5, and 9 carry the most weight — it works, here's proof it routes correctly, here's how it fails. Add 10 if fallback chains are of interest.
 
 **Good things to volunteer:**
 - Adding a provider is config-only, no code change (show `config.yaml`).
 - Validation is deliberately permissive so new provider params don't break the proxy.
 - Streaming chunks aren't rewritten — a deliberate hot-path trade that doubles as the routing proof.
 - The truncated-stream log level was a real bug found by testing, not by the test suite passing.
+- So was the fallback 400 rule: OpenRouter reports an unknown model id as a 400, so a blanket "400 never fails over" rule silently defeated the chain. Now a 400 that rejects the *model id* does fail over, since each hop sends a different id.
 
 ---
 
@@ -478,4 +586,6 @@ correct key: 200
 | All requests → 502 | Upstream unreachable — check network, or the mock isn't running. |
 | Streaming looks buffered | Add `-N` to curl. |
 | `demo/*` aliases → 404 | Router isn't using the demo config. Restart with `CONFIG_PATH=demo/config.demo.yaml`. |
+| Fallback never triggers on live OpenRouter | Expected — the `:free` tier is working. Force one with the dead-port config above, or use the mock. |
+| `/v1/usage` shows zeroes | Counters are in-process and reset on restart; they only count responses that reported usage. |
 | Demo says "Demo config not loaded" | Same as above — expected when running against live OpenRouter. |

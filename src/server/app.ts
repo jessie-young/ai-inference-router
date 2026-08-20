@@ -1,8 +1,9 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { ResolvedConfig } from '../config/schema.js';
 import { RouterError } from '../router/errors.js';
-import { listModels, resolveRoute } from '../router/resolve.js';
-import { forward } from '../upstream/client.js';
+import { listModels, resolveChain } from '../router/resolve.js';
+import { forwardWithFallback, type AttemptRecord } from '../upstream/fallback.js';
+import { UsageTracker, extractUsage } from '../observability/usage.js';
 import { parseChatCompletionRequest } from './validate.js';
 import type { Logger } from '../observability/logger.js';
 
@@ -13,6 +14,8 @@ export interface AppOptions {
   routerApiKey?: string;
   /** Injectable for tests. */
   fetchImpl?: typeof fetch;
+  /** Cumulative token accounting. One is created if not supplied. */
+  usage?: UsageTracker;
 }
 
 /** Extract a bearer token from an Authorization header. */
@@ -24,6 +27,7 @@ function bearerToken(header: string | undefined): string | undefined {
 
 export function buildApp(options: AppOptions): FastifyInstance {
   const { config, logger, routerApiKey, fetchImpl } = options;
+  const usage = options.usage ?? new UsageTracker();
 
   const app = Fastify({
     logger: false, // We emit our own structured logs.
@@ -76,8 +80,16 @@ export function buildApp(options: AppOptions): FastifyInstance {
     })),
   }));
 
+  /**
+   * Cumulative token usage per model alias, since process start.
+   *
+   * Not part of the OpenAI surface — namespaced under /v1/usage rather than
+   * inside /v1/models so it cannot be mistaken for a provider endpoint.
+   */
+  app.get('/v1/usage', async () => usage.snapshot());
+
   app.post('/v1/chat/completions', async (request, reply) => {
-    await handleChatCompletion(request, reply, { config, logger, fetchImpl });
+    await handleChatCompletion(request, reply, { config, logger, fetchImpl, usage });
   });
 
   // Unknown routes get an OpenAI-shaped 404 rather than Fastify's default,
@@ -129,6 +141,7 @@ interface HandlerDeps {
   config: ResolvedConfig;
   logger: Logger;
   fetchImpl?: typeof fetch;
+  usage: UsageTracker;
 }
 
 async function handleChatCompletion(
@@ -136,7 +149,7 @@ async function handleChatCompletion(
   reply: FastifyReply,
   deps: HandlerDeps,
 ): Promise<void> {
-  const { config, logger, fetchImpl } = deps;
+  const { config, logger, fetchImpl, usage } = deps;
   const startedAt = Date.now();
 
   // Fields captured for the access log regardless of which path we exit by.
@@ -145,6 +158,7 @@ async function handleChatCompletion(
   let upstreamModel: string | undefined;
   let attempts = 0;
   let upstreamLatencyMs: number | undefined;
+  let fallbackHistory: AttemptRecord[] = [];
 
   /**
    * Emit exactly one structured access-log line per request.
@@ -172,6 +186,19 @@ async function handleChatCompletion(
       attempts,
       latencyMs: Date.now() - startedAt,
       upstreamLatencyMs: upstreamLatencyMs ?? null,
+      // Only present when a chain actually failed over, so ordinary requests
+      // are not padded with null fields nobody reads.
+      ...(fallbackHistory.length > 1
+        ? {
+            failedOver: true,
+            chainAttempts: fallbackHistory.map((h) => ({
+              upstream: h.upstream,
+              model: h.upstreamModel,
+              status: h.status,
+              ...(h.error ? { error: h.error } : {}),
+            })),
+          }
+        : {}),
       ...extra,
     });
   };
@@ -180,20 +207,36 @@ async function handleChatCompletion(
     const body = parseChatCompletionRequest(request.body);
     alias = body.model;
 
-    const route = resolveRoute(config, body.model);
-    upstreamName = route.upstream.name;
-    upstreamModel = route.upstreamModel;
+    const chain = resolveChain(config, body.model);
+    // Report the primary up front so a failure before any hop completes still
+    // logs where the request was headed.
+    upstreamName = chain[0]!.upstream.name;
+    upstreamModel = chain[0]!.upstreamModel;
 
     const wantsStream = body.stream === true;
 
-    const result = await forward({
-      route,
+    const { result, route, history } = await forwardWithFallback({
+      chain,
       body: body as Record<string, unknown>,
       headers: request.headers,
       stream: wantsStream,
       fetchImpl,
+      onFailover: (record, next) => {
+        logger.warn('upstream_failover', {
+          requestId: request.id,
+          model: alias,
+          from: { upstream: record.upstream, model: record.upstreamModel },
+          to: { upstream: next.upstream.name, model: next.upstreamModel },
+          status: record.status,
+          ...(record.error ? { error: record.error } : {}),
+        });
+      },
     });
 
+    // Attribute the log line to the hop that actually served the request.
+    upstreamName = route.upstream.name;
+    upstreamModel = route.upstreamModel;
+    fallbackHistory = history;
     attempts = result.attempts;
     upstreamLatencyMs = result.latencyMs;
 
@@ -243,10 +286,16 @@ async function handleChatCompletion(
     }
 
     const responseBody = rewriteModelInResponse(result.body, alias);
-    const usage = extractUsage(responseBody);
+    const reported = extractUsage(responseBody);
+    if (reported) usage.record(alias, reported);
 
     await reply.status(result.status).send(responseBody);
-    logAccess(result.status, { stream: false, ...usage });
+    logAccess(result.status, {
+      stream: false,
+      promptTokens: reported?.promptTokens ?? null,
+      completionTokens: reported?.completionTokens ?? null,
+      totalTokens: reported?.totalTokens ?? null,
+    });
   } catch (err) {
     const routerError =
       err instanceof RouterError
@@ -282,19 +331,6 @@ export function rewriteModelInResponse(body: unknown, alias: string): unknown {
   const record = body as Record<string, unknown>;
   if (typeof record['model'] !== 'string') return body;
   return { ...record, model: alias };
-}
-
-/** Pull token usage out of a completion response for the access log. */
-function extractUsage(body: unknown): Record<string, unknown> {
-  if (body === null || typeof body !== 'object') return {};
-  const usage = (body as Record<string, unknown>)['usage'];
-  if (usage === null || typeof usage !== 'object') return {};
-  const u = usage as Record<string, unknown>;
-  return {
-    promptTokens: u['prompt_tokens'] ?? null,
-    completionTokens: u['completion_tokens'] ?? null,
-    totalTokens: u['total_tokens'] ?? null,
-  };
 }
 
 /** Bridge a web ReadableStream to an async iterable across Node versions. */

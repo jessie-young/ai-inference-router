@@ -37,7 +37,9 @@ describe('loadConfig', () => {
 
     expect(config.models.size).toBe(1);
     expect(config.upstreams.get('openrouter')?.apiKey).toBe('sk-test');
-    expect(config.models.get('router/gemma4')?.model).toBe('google/gemma-4-26b-a4b-it');
+    expect(config.models.get('router/gemma4')?.targets).toEqual([
+      { upstream: 'openrouter', model: 'google/gemma-4-26b-a4b-it' },
+    ]);
   });
 
   it('applies defaults for optional upstream fields', () => {
@@ -47,6 +49,67 @@ describe('loadConfig', () => {
     expect(upstream?.timeout_ms).toBe(120_000);
     expect(upstream?.max_retries).toBe(2);
     expect(upstream?.headers).toEqual({});
+  });
+
+  it('accepts a fallback chain and preserves its order', () => {
+    const path = writeConfig(`
+upstreams:
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: TEST_KEY
+models:
+  router/gemma4:
+    targets:
+      - upstream: openrouter
+        model: google/gemma-4-26b-a4b-it:free
+      - upstream: openrouter
+        model: google/gemma-4-26b-a4b-it
+`);
+    const config = loadConfig(path, { env: { TEST_KEY: 'sk-test' } });
+
+    expect(config.models.get('router/gemma4')?.targets).toEqual([
+      { upstream: 'openrouter', model: 'google/gemma-4-26b-a4b-it:free' },
+      { upstream: 'openrouter', model: 'google/gemma-4-26b-a4b-it' },
+    ]);
+  });
+
+  it('normalizes the single-target form into a one-element chain', () => {
+    // Both spellings must produce the same shape so nothing downstream
+    // has to branch on which form the operator happened to write.
+    const config = loadConfig(writeConfig(VALID), { env: { TEST_KEY: 'sk-test' } });
+    expect(config.models.get('router/gemma4')?.targets).toHaveLength(1);
+  });
+
+  it('rejects an empty targets list', () => {
+    const path = writeConfig(`
+upstreams:
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: TEST_KEY
+models:
+  router/empty:
+    targets: []
+`);
+    expect(() => loadConfig(path, { env: { TEST_KEY: 'sk-test' } })).toThrow();
+  });
+
+  it('names the failing position when a fallback target is misconfigured', () => {
+    const path = writeConfig(`
+upstreams:
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: TEST_KEY
+models:
+  router/gemma4:
+    targets:
+      - upstream: openrouter
+        model: good/model
+      - upstream: typo
+        model: other/model
+`);
+    expect(() => loadConfig(path, { env: { TEST_KEY: 'sk-test' } })).toThrow(
+      /fallback position 2/,
+    );
   });
 
   it('fails when the referenced environment variable is not set', () => {
@@ -121,7 +184,11 @@ models:
       'router/mistral-small',
       'router/nemotron3',
     ]);
-    expect(config.models.get('router/nemotron3')?.model).toBe('nvidia/nemotron-3-nano-30b-a3b');
-    expect(config.models.get('router/mistral-small')?.model).toBe('mistralai/mistral-small-2603');
+    expect(config.models.get('router/nemotron3')?.targets[0]?.model).toBe(
+      'nvidia/nemotron-3-nano-30b-a3b',
+    );
+    expect(config.models.get('router/mistral-small')?.targets[0]?.model).toBe(
+      'mistralai/mistral-small-2603',
+    );
   });
 });

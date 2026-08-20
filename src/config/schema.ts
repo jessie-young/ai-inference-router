@@ -27,13 +27,42 @@ export const upstreamSchema = z.object({
   headers: headersSchema.default({}),
 });
 
-export const modelRouteSchema = z.object({
+/** One hop in a model's fallback chain. */
+export const routeTargetSchema = z.object({
   /** Key into `upstreams`. Validated by cross-reference after parsing. */
   upstream: z.string().min(1),
 
   /** The model identifier this upstream expects, e.g. google/gemma-4-26b-a4b-it */
   model: z.string().min(1),
 });
+
+/**
+ * A model alias maps to either a single target or an ordered fallback chain.
+ *
+ * Both spellings are supported so the simple case stays simple:
+ *
+ *   router/gemma4:                 # single target
+ *     upstream: openrouter
+ *     model: google/gemma-4-26b-a4b-it
+ *
+ *   router/gemma4:                 # fallback chain, tried in order
+ *     targets:
+ *       - upstream: openrouter
+ *         model: google/gemma-4-26b-a4b-it:free
+ *       - upstream: openrouter
+ *         model: google/gemma-4-26b-a4b-it
+ *
+ * The single-target form is normalized to a one-element chain at load time, so
+ * everything downstream handles exactly one shape.
+ */
+export const modelRouteSchema = z.union([
+  routeTargetSchema,
+  z.object({
+    targets: z
+      .array(routeTargetSchema)
+      .min(1, 'targets must list at least one upstream/model pair'),
+  }),
+]);
 
 export const configSchema = z.object({
   upstreams: z
@@ -49,8 +78,14 @@ export const configSchema = z.object({
 });
 
 export type UpstreamConfig = z.infer<typeof upstreamSchema>;
+export type RouteTarget = z.infer<typeof routeTargetSchema>;
 export type ModelRoute = z.infer<typeof modelRouteSchema>;
 export type RawConfig = z.infer<typeof configSchema>;
+
+/** A model alias after normalization: always an ordered list of targets. */
+export interface NormalizedRoute {
+  targets: RouteTarget[];
+}
 
 /** An upstream with its API key resolved from the environment. */
 export interface ResolvedUpstream extends UpstreamConfig {
@@ -61,5 +96,5 @@ export interface ResolvedUpstream extends UpstreamConfig {
 /** The fully validated, ready-to-use configuration. */
 export interface ResolvedConfig {
   upstreams: Map<string, ResolvedUpstream>;
-  models: Map<string, ModelRoute>;
+  models: Map<string, NormalizedRoute>;
 }

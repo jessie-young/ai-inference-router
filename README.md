@@ -74,7 +74,7 @@ npm start                 # terminal 1
 | `npm run dev` | Start with hot reload |
 | `npm run build` | Compile TypeScript to `dist/` |
 | `npm start` | Run the compiled build |
-| `npm test` | Run the test suite (59 tests, no network required) |
+| `npm test` | Run the test suite (102 tests, no network required) |
 | `npm run type-check` | Type-check without emitting |
 
 ## Configuration
@@ -212,11 +212,76 @@ A test asserts that no API key ever reaches the logs.
 
 ## Extensions implemented
 
-Beyond the core requirements:
+All three optional extensions, plus a few smaller additions.
 
-- **Streaming** (`stream: true`) — SSE frames are piped through as they arrive.
-  The core requirement covers only non-streaming, so this is additive; the
-  non-streaming path is unaffected by it.
+### A. Streaming
+
+`stream: true` returns Server-Sent Events, relayed as they arrive rather than
+buffered. Backpressure is respected, so a slow client cannot make chunks pile up
+in memory. A stream that dies mid-flight ends cleanly without a `[DONE]`
+sentinel — which is how a client detects truncation — and is logged at `error`
+level with `truncated: true`, even though the HTTP status was already `200`.
+
+### B. Fallback chains
+
+A model alias can list an ordered set of targets. When one fails, the router
+advances to the next; the client sees a single successful response and never
+learns a failure happened. See [Fallback chains](#fallback-chains) for the
+config syntax.
+
+**Retry and fallback are separate layers, deliberately.** Retry re-attempts the
+*same* target for a blip that will probably clear on its own. Fallback gives up
+on a target entirely for a failure retrying will not fix — out of quota,
+provider down, credentials rejected. Each target exhausts its own retries before
+the chain advances.
+
+**What triggers a failover:** 401, 402, 403, 404, 408, 429, and 5xx — plus
+network errors and timeouts. All are specific to one target.
+
+**What does not:** a 400. The request itself is malformed, so the next provider
+would reject it identically and failing over would only multiply latency and
+cost. The one exception is a 400 whose body says the *model id* was rejected
+(OpenRouter answers `"... is not a valid model ID"` this way). Each hop sends a
+different model id, so that failure really is target-specific — treating every
+400 as fatal silently defeats the chain, which live testing caught.
+
+**When every target fails**, the *last* failure is surfaced: by then the chain
+is exhausted and the final attempt is the most recent evidence of why.
+
+Failovers log an `upstream_failover` warning naming both endpoints, and the
+access line gains `failedOver: true` plus a `chainAttempts` array showing every
+hop and what it returned.
+
+### C. Token counting
+
+`GET /v1/usage` reports cumulative prompt, completion, and total tokens, broken
+down per model alias and sorted by spend:
+
+```json
+{
+  "since": "2026-08-20T16:58:39.186Z",
+  "totals": { "requests": 4, "promptTokens": 65, "completionTokens": 25, "totalTokens": 90 },
+  "byModel": {
+    "router/nemotron3": { "requests": 1, "promptTokens": 21, "completionTokens": 20, "totalTokens": 41 },
+    "router/gemma4": { "requests": 2, "promptTokens": 24, "completionTokens": 3, "totalTokens": 27 }
+  }
+}
+```
+
+Counts are attributed to the **alias**, not the upstream model. With a fallback
+chain one alias can be served by several different models, and the question
+being answered is "what did this alias cost me".
+
+Only responses that actually report usage are counted, so a provider that omits
+the block does not silently record as zero — "not reported" stays distinct from
+"free". Failed requests are not counted at all.
+
+Deliberately in-process and unpersisted: a restart resets the counters. This is
+operational visibility, not billing — anything authoritative belongs in the
+provider's billing data or a metrics backend scraped from these numbers.
+
+### Smaller additions
+
 - **Retries with exponential backoff and jitter** on transient failures.
 - **`GET /v1/models`** and **`GET /health`**.
 - **Optional router-level auth** via `ROUTER_API_KEY`.
@@ -277,7 +342,7 @@ Everything else in the request path is transport.
 ## Testing
 
 ```bash
-npm test    # 59 tests
+npm test    # 102 tests
 ```
 
 The suite runs fully offline — no API key, no network — so it works in CI. Rather
@@ -288,7 +353,9 @@ actually refused, streams actually chunked. That is where proxy bugs live.
 Coverage includes config validation, alias resolution, header and credential
 handling, parameter passthrough, retry behavior, all error paths (unknown model,
 upstream 5xx, timeout, unreachable, non-JSON response), streaming passthrough and
-incremental delivery, auth, and log redaction.
+incremental delivery, auth, and log redaction. The extensions add fallback
+chains (each failover trigger, the no-failover-on-400 rule, retry-then-advance
+ordering, and chain exhaustion) and token counting.
 
 Verified end to end against live OpenRouter: all three aliases return
 completions, streaming works, and the official OpenAI SDK works unmodified
@@ -298,15 +365,19 @@ including typed errors and `models.list()`.
 
 Roughly in priority order:
 
-1. **Health-aware failover.** Config already supports multiple upstreams per
-   provider; the natural next step is a secondary upstream per alias with
-   circuit breaking, so a provider outage degrades instead of failing.
-2. **Load balancing across upstreams** for the same alias — weighted or
-   least-latency — which the current config shape accommodates without change.
-3. **Prometheus metrics.** The access log already carries the right fields;
-   exposing them as counters and histograms at `/metrics` is mostly plumbing.
-4. **Per-key rate limiting and budgets**, once more than one client uses it.
-5. **Request/response caching** for identical deterministic (`temperature: 0`)
+1. **Circuit breaking on top of fallback.** Chains currently try the primary
+   every time. A breaker that skips a target known to be failing would cut the
+   latency penalty during a sustained outage.
+2. **Load balancing across targets** for the same alias — weighted or
+   least-latency — which the chain config already accommodates.
+3. **Prometheus metrics.** The access log and usage tracker carry the right
+   fields; exposing them at `/metrics` is mostly plumbing.
+4. **Persisting usage** to survive restarts, and per-key budgets once more than
+   one client uses it.
+5. **Streaming token counts.** Usage is recorded for non-streaming responses;
+   capturing it from a stream means parsing the final SSE frame, which the
+   passthrough design deliberately avoids today.
+6. **Request/response caching** for identical deterministic (`temperature: 0`)
    requests.
 
 ## Project structure
@@ -319,14 +390,16 @@ src/
 ├── router/          # The routing decision, and OpenAI-shaped errors
 │   ├── resolve.ts
 │   └── errors.ts
-├── upstream/        # Forwarding, retry policy, timeouts
+├── upstream/        # Forwarding, retry policy, fallback chains, timeouts
 │   ├── client.ts
+│   ├── fallback.ts
 │   └── retry.ts
 ├── server/          # Fastify app, request validation
 │   ├── app.ts
 │   └── validate.ts
-├── observability/   # Structured logging with redaction
-│   └── logger.ts
+├── observability/   # Structured logging with redaction; token accounting
+│   ├── logger.ts
+│   └── usage.ts
 └── index.ts         # Entry point
 ```
 

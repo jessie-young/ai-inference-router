@@ -1,6 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
-import { configSchema, type ResolvedConfig, type ResolvedUpstream } from './schema.js';
+import {
+  configSchema,
+  type NormalizedRoute,
+  type ResolvedConfig,
+  type ResolvedUpstream,
+} from './schema.js';
 
 /**
  * Thrown when configuration is invalid. Carries a human-readable, multi-line
@@ -79,15 +84,28 @@ export function loadConfig(path: string, options: LoadOptions = {}): ResolvedCon
     );
   }
 
-  // Cross-reference: every model alias must point at an upstream that exists.
+  // Normalize both config spellings into a single shape: every alias becomes an
+  // ordered list of targets, so nothing downstream needs to branch on which
+  // form the operator wrote.
+  const normalizedModels = new Map<string, NormalizedRoute>();
+  for (const [alias, route] of Object.entries(models)) {
+    normalizedModels.set(
+      alias,
+      'targets' in route ? { targets: route.targets } : { targets: [route] },
+    );
+  }
+
+  // Cross-reference: every target must point at an upstream that exists.
   // zod cannot express this, so it is checked explicitly.
   const danglingRefs: string[] = [];
-  for (const [alias, route] of Object.entries(models)) {
-    if (!resolvedUpstreams.has(route.upstream)) {
-      danglingRefs.push(
-        `  - model "${alias}" references unknown upstream "${route.upstream}"`,
-      );
-    }
+  for (const [alias, route] of normalizedModels.entries()) {
+    route.targets.forEach((target, index) => {
+      if (!resolvedUpstreams.has(target.upstream)) {
+        const where =
+          route.targets.length > 1 ? `${alias}" (fallback position ${index + 1})` : `${alias}"`;
+        danglingRefs.push(`  - model "${where} references unknown upstream "${target.upstream}"`);
+      }
+    });
   }
 
   if (danglingRefs.length > 0) {
@@ -98,8 +116,5 @@ export function loadConfig(path: string, options: LoadOptions = {}): ResolvedCon
     );
   }
 
-  return {
-    upstreams: resolvedUpstreams,
-    models: new Map(Object.entries(models)),
-  };
+  return { upstreams: resolvedUpstreams, models: normalizedModels };
 }

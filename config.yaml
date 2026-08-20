@@ -21,9 +21,16 @@ upstreams:
       X-Title: AI Inference Router
 
 models:
+  # A fallback chain: targets are tried in order. The :free tier is attempted
+  # first and the paid model takes over when it is out of quota, rate limited,
+  # or unavailable. A malformed request is NOT retried down the chain, since
+  # the next provider would reject it identically.
   router/gemma4:
-    upstream: openrouter
-    model: google/gemma-4-26b-a4b-it
+    targets:
+      - upstream: openrouter
+        model: google/gemma-4-26b-a4b-it:free
+      - upstream: openrouter
+        model: google/gemma-4-26b-a4b-it
 
   router/nemotron3:
     upstream: openrouter
@@ -33,6 +40,9 @@ models:
     upstream: openrouter
     model: mistralai/mistral-small-2603
 
+# The single-target form below is shorthand for a one-element chain; both
+# spellings are supported so simple aliases stay simple.
+#
 # Adding another provider is purely additive — no code changes:
 #
 # upstreams:

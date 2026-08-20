@@ -19,8 +19,11 @@ const config: ResolvedConfig = {
     ],
   ]),
   models: new Map([
-    ['router/gemma4', { upstream: 'openrouter', model: 'google/gemma-4-26b-a4b-it' }],
-    ['router/nemotron3', { upstream: 'openrouter', model: 'nvidia/nemotron-3-nano-30b-a3b' }],
+    ['router/gemma4', { targets: [{ upstream: 'openrouter', model: 'google/gemma-4-26b-a4b-it' }] }],
+    [
+      'router/nemotron3',
+      { targets: [{ upstream: 'openrouter', model: 'nvidia/nemotron-3-nano-30b-a3b' }] },
+    ],
   ]),
 };
 
@@ -63,7 +66,7 @@ describe('resolveRoute', () => {
   it('surfaces a dangling upstream reference as a 500, not a crash', () => {
     const broken: ResolvedConfig = {
       upstreams: new Map(),
-      models: new Map([['router/x', { upstream: 'ghost', model: 'y' }]]),
+      models: new Map([['router/x', { targets: [{ upstream: 'ghost', model: 'y' }] }]]),
     };
     try {
       resolveRoute(broken, 'router/x');

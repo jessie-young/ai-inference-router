@@ -189,7 +189,36 @@ echo
 note "Tokens arrive incrementally, ending with 'data: [DONE]'."
 pause
 
-hdr "8. Works with the official OpenAI SDK"
+hdr "8. Token counting (extension C)"
+note "The router accumulates prompt/completion tokens per model alias."
+cmd "curl $BASE/v1/usage"
+curl -s "$BASE/v1/usage" -o /tmp/_usage.json
+python3 - /tmp/_usage.json <<'PYUSAGE'
+import sys, json
+d = json.load(open(sys.argv[1]))
+t = d['totals']
+print(f"  since   : {d['since']}")
+print(f"  requests: {t['requests']}")
+print(f"  tokens  : {t['promptTokens']} prompt + {t['completionTokens']} completion = {t['totalTokens']} total")
+print()
+if d['byModel']:
+    print(f"  {'ALIAS':<24} {'REQS':>5} {'PROMPT':>8} {'COMPL':>8} {'TOTAL':>8}")
+    print("  " + "-" * 57)
+    for alias, u in d['byModel'].items():
+        print(f"  {alias:<24} {u['requests']:>5} {u['promptTokens']:>8} {u['completionTokens']:>8} {u['totalTokens']:>8}")
+else:
+    print('  (no traffic recorded yet)')
+PYUSAGE
+rm -f /tmp/_usage.json
+
+echo
+note "Counted against the ALIAS, not the upstream model — with a fallback chain"
+note "one alias can be served by several models, and the question being answered"
+note "is what that alias cost. In-process and resets on restart: this is"
+note "operational visibility, not billing."
+pause
+
+hdr "9. Works with the official OpenAI SDK"
 note "The real compatibility test: only baseURL changes."
 if [ -d node_modules/openai ]; then
   node demo/sdk-demo.mjs
@@ -205,7 +234,7 @@ fi
 if [ "$SECTION" = "all" ] || [ "$SECTION" = "errors" ]; then
 ########################################################################
 
-hdr "9. Error handling: unknown model"
+hdr "10. Error handling: unknown model"
 note "The router never forwards a request it cannot route."
 cmd "curl $BASE/v1/chat/completions -d '{\"model\":\"gpt-4\",...}'"
 curl -s -w "\n${DIM}HTTP %{http_code}${RESET}\n" "$BASE/v1/chat/completions" \
@@ -216,7 +245,7 @@ note "404, OpenAI error envelope, and it lists the valid aliases so the"
 note "caller can fix it without reading docs."
 pause
 
-hdr "10. Error handling: malformed requests"
+hdr "11. Error handling: malformed requests"
 for label in "missing messages:{\"model\":\"router/gemma4\"}" \
              "empty messages:{\"model\":\"router/gemma4\",\"messages\":[]}" \
              "wrong type:{\"model\":123,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" \
@@ -240,7 +269,7 @@ echo
 note "Every failure uses the OpenAI error shape, so SDK error handling works."
 pause
 
-hdr "11. Simulating UPSTREAM failures"
+hdr "12. Simulating UPSTREAM failures"
 note "Real providers fail on their own schedule. To demo this deterministically"
 note "we point the router at a mock upstream that fails on command."
 echo
@@ -294,12 +323,49 @@ else
 fi
 pause
 
-hdr "12. Observability"
+hdr "13. Fallback chains (extension B)"
+note "A model alias can list several targets. If one fails, the router advances"
+note "to the next automatically — the client never sees the failure."
+echo
+if curl -sf "$BASE/v1/models" 2>/dev/null | grep -q "demo/fallback"; then
+  echo "${BOLD}Primary unreachable → falls back:${RESET}"
+  r=$(curl -s -w "|%{http_code}" "$BASE/v1/chat/completions" -H 'content-type: application/json' \
+    -d '{"model":"demo/fallback","messages":[{"role":"user","content":"hi"}]}')
+  echo "  HTTP ${r##*|}  ${DIM}(client sees success despite the first target being down)${RESET}"
+  echo
+  echo "${BOLD}Primary out of credit (402) → falls back, like an exhausted :free tier:${RESET}"
+  r=$(curl -s -w "|%{http_code}" "$BASE/v1/chat/completions" -H 'content-type: application/json' \
+    -d '{"model":"demo/fallback-quota","messages":[{"role":"user","content":"hi"}]}')
+  echo "  HTTP ${r##*|}  ${DIM}(this is the motivating case from the spec)${RESET}"
+  echo
+  echo "${BOLD}Every target fails → the LAST failure is surfaced:${RESET}"
+  r=$(curl -s -w "|%{http_code}" "$BASE/v1/chat/completions" -H 'content-type: application/json' \
+    -d '{"model":"demo/fallback-exhausted","messages":[{"role":"user","content":"hi"}]}')
+  echo "  HTTP ${r##*|}  ${DIM}(429 then 500; the client gets 500, the final evidence)${RESET}"
+  echo
+  echo "${BOLD}Malformed request → does NOT walk the chain:${RESET}"
+  r=$(curl -s -w "|%{http_code}" "$BASE/v1/chat/completions" -H 'content-type: application/json' \
+    -d '{"model":"demo/fallback-badrequest","messages":[{"role":"user","content":"hi"}]}')
+  echo "  HTTP ${r##*|}  ${DIM}(400 — the next provider would reject it identically,${RESET}"
+  echo "        ${DIM} so failing over would only multiply cost and latency)${RESET}"
+  echo
+  note "Watch the mock upstream's terminal: it shows which targets were hit."
+  note "The router logs an 'upstream_failover' warning naming both endpoints."
+else
+  note "${YELLOW}Demo config not loaded — skipping fallback simulation.${RESET}"
+  note "Start the mock upstream and restart the router with the demo config"
+  note "(see section 12) to run these."
+fi
+pause
+
+hdr "14. Observability"
 note "One structured JSON line per request. Point ROUTER_LOG at your log file"
 note "to see them here; otherwise watch the terminal running the router."
 echo
 note "Every line carries: timestamp, requestId, alias, upstream, upstreamModel,"
 note "status, attempts, latencyMs, upstreamLatencyMs, and token usage."
+note "When a chain fails over, the line adds failedOver plus a chainAttempts"
+note "array showing every hop tried and what each returned."
 echo
 note "Useful one-liners:"
 cmd "tail -f router.log | python3 -m json.tool"

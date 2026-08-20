@@ -34,8 +34,11 @@ export function buildTestApp(options: TestAppOptions): TestApp {
       ],
     ]),
     models: new Map([
-      ['router/gemma4', { upstream: 'stub', model: 'google/gemma-4-26b-a4b-it' }],
-      ['router/nemotron3', { upstream: 'stub', model: 'nvidia/nemotron-3-nano-30b-a3b' }],
+      ['router/gemma4', { targets: [{ upstream: 'stub', model: 'google/gemma-4-26b-a4b-it' }] }],
+      [
+        'router/nemotron3',
+        { targets: [{ upstream: 'stub', model: 'nvidia/nemotron-3-nano-30b-a3b' }] },
+      ],
     ]),
   };
 

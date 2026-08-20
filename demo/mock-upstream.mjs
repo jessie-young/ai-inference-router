@@ -59,6 +59,20 @@ const server = createServer((req, res) => {
       });
     }
 
+    if (path.includes('/fail-402')) {
+      console.log('   → responding 402 (out of credit — like an exhausted :free tier)');
+      return json(402, {
+        error: { message: 'Insufficient credits', type: 'billing_error', code: 'insufficient_credits' },
+      });
+    }
+
+    if (path.includes('/fail-400')) {
+      console.log('   → responding 400 (malformed request — must NOT fail over)');
+      return json(400, {
+        error: { message: 'messages must be non-empty', type: 'invalid_request_error' },
+      });
+    }
+
     if (path.includes('/fail-401')) {
       console.log('   → responding 401 (bad upstream credentials)');
       return json(401, { error: { message: 'Invalid API key', type: 'authentication_error' } });
@@ -117,5 +131,6 @@ const server = createServer((req, res) => {
 
 server.listen(port, () => {
   console.log(`Mock upstream listening on http://127.0.0.1:${port}`);
-  console.log('Failure modes: /fail-500 /fail-429 /fail-401 /timeout /garbage /flaky /truncate');
+  console.log('Failure modes: /fail-500 /fail-429 /fail-402 /fail-401 /fail-400');
+  console.log('               /timeout /garbage /flaky /truncate');
 });

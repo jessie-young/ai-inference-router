@@ -46,6 +46,16 @@ upstreams:
     api_key_env: MOCK_API_KEY
     max_retries: 0
 
+  mock-402:
+    base_url: http://127.0.0.1:9090/v1/fail-402
+    api_key_env: MOCK_API_KEY
+    max_retries: 0
+
+  mock-400:
+    base_url: http://127.0.0.1:9090/v1/fail-400
+    api_key_env: MOCK_API_KEY
+    max_retries: 0
+
   mock-garbage:
     base_url: http://127.0.0.1:9090/v1/garbage
     api_key_env: MOCK_API_KEY
@@ -63,6 +73,41 @@ upstreams:
     max_retries: 0
 
 models:
+  # --- Fallback chain demos (extension B) ---
+
+  # Primary is dead (nothing listening); the chain advances to the healthy mock.
+  demo/fallback:
+    targets:
+      - upstream: mock-dead
+        model: mock/primary-model
+      - upstream: mock
+        model: mock/fallback-model
+
+  # Primary is out of credit (402), exactly like an exhausted :free tier.
+  demo/fallback-quota:
+    targets:
+      - upstream: mock-402
+        model: mock/free-tier-model
+      - upstream: mock
+        model: mock/paid-model
+
+  # Every hop fails: the client sees the LAST failure, not the first.
+  demo/fallback-exhausted:
+    targets:
+      - upstream: mock-429
+        model: mock/busy-model
+      - upstream: mock-500
+        model: mock/broken-model
+
+  # A malformed request must NOT walk the chain — the next provider would
+  # reject it identically, so failing over would only multiply cost.
+  demo/fallback-badrequest:
+    targets:
+      - upstream: mock-400
+        model: mock/strict-model
+      - upstream: mock
+        model: mock/fallback-model
+
   demo/healthy:
     upstream: mock
     model: mock/healthy-model
