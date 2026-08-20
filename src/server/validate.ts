@@ -26,7 +26,13 @@ export const chatCompletionRequestSchema = z
     messages: z
       .array(messageSchema)
       .min(1, 'messages must contain at least one message'),
-    stream: z.boolean().optional(),
+    // OpenAI declares `stream` as `nullable: true, default: false` in its
+    // OpenAPI spec, so an explicit JSON null is a valid way to say "not
+    // streaming". The first-party SDKs omit the field instead, but clients
+    // that serialize unset optionals as null (Go/Java zero values, JSON
+    // templating, some wrappers) do send it. Rejecting it would be stricter
+    // than the API we claim to be compatible with.
+    stream: z.boolean().nullish(),
   })
   .passthrough();
 

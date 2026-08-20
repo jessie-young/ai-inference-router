@@ -85,16 +85,40 @@ curl http://localhost:8080/v1/models
 Returns the OpenAI model-list shape, listing **aliases** — clients never see
 provider model names.
 
-### A basic completion
+### A basic completion (non-streaming)
+
+This is the mode the core requirement targets — one JSON response, no SSE.
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{
     "model": "router/gemma4",
-    "messages": [{"role": "user", "content": "Say hello in 5 words."}]
+    "messages": [{"role": "user", "content": "Say hello in 5 words."}],
+    "stream": false
   }'
 ```
+
+### Non-streaming is the default
+
+Every way of saying "not streaming" returns a single JSON body:
+
+```bash
+for variant in '' ',"stream":false' ',"stream":null'; do
+  curl -s -o /tmp/ns.json -w "HTTP %{http_code}  " http://localhost:8080/v1/chat/completions \
+    -H 'content-type: application/json' \
+    -d "{\"model\":\"router/gemma4\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":5$variant}"
+  python3 -c "import json;print('object=' + json.load(open('/tmp/ns.json'))['object'])"
+done
+```
+```
+HTTP 200  object=chat.completion    # stream omitted
+HTTP 200  object=chat.completion    # stream: false
+HTTP 200  object=chat.completion    # stream: null
+```
+
+Only an explicit `stream: true` returns `text/event-stream`. `null` is accepted
+because OpenAI's spec declares `stream` as nullable with a `false` default.
 
 ### All three models, same request shape
 
@@ -110,7 +134,9 @@ done
 
 Only the `model` field changes. That is the router's whole value proposition.
 
-### Streaming
+### Streaming (extension — beyond the required scope)
+
+The core requirement covers non-streaming only. Streaming is additive:
 
 ```bash
 curl -N http://localhost:8080/v1/chat/completions \

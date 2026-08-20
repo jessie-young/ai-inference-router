@@ -81,23 +81,24 @@ cmd "curl $BASE/v1/models"
 curl -s "$BASE/v1/models" | pp
 pause
 
-hdr "3. A basic chat completion"
-note "Standard OpenAI Chat Completions request. Nothing provider-specific."
-cmd "curl $BASE/v1/chat/completions -d '{\"model\":\"router/gemma4\",...}'"
+hdr "3. A basic chat completion (non-streaming)"
+note "Standard OpenAI Chat Completions request with stream:false — the mode"
+note "the core requirement targets. One JSON response, no SSE."
+cmd "curl $BASE/v1/chat/completions -d '{\"model\":\"router/gemma4\",...,\"stream\":false}'"
 curl -s "$BASE/v1/chat/completions" -H 'content-type: application/json' \
-  -d '{"model":"router/gemma4","messages":[{"role":"user","content":"Say hello in exactly 5 words."}],"max_tokens":40}' \
+  -d '{"model":"router/gemma4","messages":[{"role":"user","content":"Say hello in exactly 5 words."}],"stream":false,"max_tokens":40}' \
   | summarize
 echo
 note "Note 'model' came back as the alias router/gemma4 — not the upstream id."
 note "Clients stay decoupled from whichever backend we route to."
 pause
 
-hdr "4. Same API, three different models"
+hdr "4. Same API, three different models (non-streaming)"
 note "Only the model field changes. This is the whole point of the router."
 for m in router/gemma4 router/nemotron3 router/mistral-small; do
   echo "${BOLD}$m${RESET}"
   curl -s "$BASE/v1/chat/completions" -H 'content-type: application/json' \
-    -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: OK\"}],\"max_tokens\":30}" \
+    -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: OK\"}],\"stream\":false,\"max_tokens\":30}" \
     | summarize
   echo
 done
@@ -122,14 +123,28 @@ else
   note "  (set ROUTER_LOG=/path/to/router.log to display the log line here)"
 fi
 echo
-echo "${BOLD}(b) The model identifies itself${RESET}"
-note "Independent of anything we log — ask the model what it is:"
-printf "  router/gemma4 says: "
-curl -s "$BASE/v1/chat/completions" -H 'content-type: application/json' \
-  -d '{"model":"router/gemma4","messages":[{"role":"user","content":"Who trained you? Answer in under 8 words."}],"max_tokens":40}' \
-  | python3 -c "import sys,json; c=json.load(sys.stdin)['choices'][0]['message']; print((c.get('content') or c.get('reasoning') or '')[:80].strip())"
+echo "${BOLD}(b) The models identify themselves — non-streaming${RESET}"
+note "Independent of our logs, and needs no streaming: each model reports a"
+note "different creator, and only Nemotron emits a 'reasoning' field."
+for m in router/gemma4 router/nemotron3 router/mistral-small; do
+  printf "  %-22s → " "$m"
+  curl -s "$BASE/v1/chat/completions" -H 'content-type: application/json' \
+    -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"Complete: 'I am a language model created by' — answer with ONLY the organization name.\"}],\"max_tokens\":30}" \
+    | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+msg = d['choices'][0]['message']
+text = (msg.get('content') or msg.get('reasoning') or '').strip().replace(chr(10), ' ')
+tag = '  \033[2m[+reasoning field]\033[0m' if msg.get('reasoning') else ''
+print(f'\033[32m{text[:34]:<34}\033[0m{tag}')
+"
+done
+echo
+note "Gemma reports Google, Mistral reports Mistral AI, and Nemotron's distinct"
+note "response structure is itself a fingerprint. Three aliases, three backends."
 echo
 echo "${BOLD}(c) Strongest: the raw SSE stream from OpenRouter${RESET}"
+note "${DIM}(This one uses streaming — an extension beyond the required scope.)${RESET}"
 note "We deliberately do NOT rewrite streaming chunks, so the model id inside"
 note "them comes straight from the provider — unfiltered by our code."
 for m in router/gemma4 router/nemotron3 router/mistral-small; do
@@ -142,7 +157,28 @@ echo
 note "Each alias resolved to exactly the upstream model the spec required."
 pause
 
-hdr "6. Streaming"
+hdr "6. Non-streaming is the default"
+note "Every way of saying \"not streaming\" returns one JSON body, never SSE."
+for variant in '(omitted)::' 'false::,"stream":false' 'null::,"stream":null'; do
+  label="${variant%%::*}"; frag="${variant##*::}"
+  printf "  stream %-10s → " "$label"
+  curl -s -o /tmp/_ns.json -w "HTTP %{http_code}  " "$BASE/v1/chat/completions" \
+    -H 'content-type: application/json' \
+    -d "{\"model\":\"router/gemma4\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":5$frag}"
+  python3 -c "
+import json
+try: print('object=' + json.load(open('/tmp/_ns.json')).get('object', '?'))
+except Exception: print('(non-JSON)')
+"
+done
+rm -f /tmp/_ns.json
+echo
+note "OpenAI's spec declares stream as nullable with a false default, so an"
+note "explicit null is accepted too — some clients serialize unset fields that"
+note "way. Only an explicit true switches to SSE."
+pause
+
+hdr "7. Streaming (extension, beyond the required scope)"
 note "stream:true returns Server-Sent Events, forwarded as they arrive."
 cmd "curl -N $BASE/v1/chat/completions -d '{...,\"stream\":true}'"
 curl -sN "$BASE/v1/chat/completions" -H 'content-type: application/json' \
@@ -153,7 +189,7 @@ echo
 note "Tokens arrive incrementally, ending with 'data: [DONE]'."
 pause
 
-hdr "7. Works with the official OpenAI SDK"
+hdr "8. Works with the official OpenAI SDK"
 note "The real compatibility test: only baseURL changes."
 if [ -d node_modules/openai ]; then
   node demo/sdk-demo.mjs
@@ -169,7 +205,7 @@ fi
 if [ "$SECTION" = "all" ] || [ "$SECTION" = "errors" ]; then
 ########################################################################
 
-hdr "8. Error handling: unknown model"
+hdr "9. Error handling: unknown model"
 note "The router never forwards a request it cannot route."
 cmd "curl $BASE/v1/chat/completions -d '{\"model\":\"gpt-4\",...}'"
 curl -s -w "\n${DIM}HTTP %{http_code}${RESET}\n" "$BASE/v1/chat/completions" \
@@ -180,7 +216,7 @@ note "404, OpenAI error envelope, and it lists the valid aliases so the"
 note "caller can fix it without reading docs."
 pause
 
-hdr "9. Error handling: malformed requests"
+hdr "10. Error handling: malformed requests"
 for label in "missing messages:{\"model\":\"router/gemma4\"}" \
              "empty messages:{\"model\":\"router/gemma4\",\"messages\":[]}" \
              "wrong type:{\"model\":123,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" \
@@ -204,7 +240,7 @@ echo
 note "Every failure uses the OpenAI error shape, so SDK error handling works."
 pause
 
-hdr "10. Simulating UPSTREAM failures"
+hdr "11. Simulating UPSTREAM failures"
 note "Real providers fail on their own schedule. To demo this deterministically"
 note "we point the router at a mock upstream that fails on command."
 echo
@@ -258,7 +294,7 @@ else
 fi
 pause
 
-hdr "11. Observability"
+hdr "12. Observability"
 note "One structured JSON line per request. Point ROUTER_LOG at your log file"
 note "to see them here; otherwise watch the terminal running the router."
 echo

@@ -147,7 +147,7 @@ models:
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /v1/chat/completions` | Chat Completions, streaming and non-streaming |
+| `POST /v1/chat/completions` | Chat Completions. Non-streaming by default; SSE when `stream: true` |
 | `GET /v1/models` | List configured aliases in OpenAI format |
 | `GET /health` | Liveness check; never requires auth |
 
@@ -215,6 +215,8 @@ A test asserts that no API key ever reaches the logs.
 Beyond the core requirements:
 
 - **Streaming** (`stream: true`) — SSE frames are piped through as they arrive.
+  The core requirement covers only non-streaming, so this is additive; the
+  non-streaming path is unaffected by it.
 - **Retries with exponential backoff and jitter** on transient failures.
 - **`GET /v1/models`** and **`GET /health`**.
 - **Optional router-level auth** via `ROUTER_API_KEY`.
@@ -227,6 +229,15 @@ untouched. Strictly validating the full OpenAI schema would mean this proxy
 breaks every time a provider ships a new parameter, which is the opposite of
 what a routing layer is for. A test asserts that unknown parameters survive
 the hop.
+
+**Non-streaming is the default, and every spelling of it works.** A request with
+`stream` omitted, `stream: false`, or `stream: null` returns a single JSON
+completion; only an explicit `stream: true` switches to SSE. OpenAI's OpenAPI
+declares `stream` as `nullable: true, default: false`, so `null` is a legitimate
+way for a client to say "not streaming" — clients that serialize unset optionals
+as null do send it. The router accepts it and drops the key before forwarding,
+because not every provider is that lenient (OpenRouter rejects an explicit null
+with a 400). Tests pin all four cases.
 
 **Responses report the alias, not the upstream id.** A client that asks for
 `router/gemma4` gets `"model": "router/gemma4"` back. Leaking the upstream id

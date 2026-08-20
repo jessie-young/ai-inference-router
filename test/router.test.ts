@@ -182,6 +182,100 @@ describe('POST /v1/chat/completions — happy path', () => {
   });
 });
 
+describe('non-streaming is the default', () => {
+  // The spec this router was built against guarantees only that callers send
+  // `stream: false` or omit it. Those paths must return a plain JSON body,
+  // never SSE, for every spelling of "not streaming".
+  const NON_STREAMING_BODIES: Array<[string, Record<string, unknown>]> = [
+    ['stream omitted', { model: 'router/gemma4', messages: REQUEST.messages }],
+    ['stream: false', { model: 'router/gemma4', messages: REQUEST.messages, stream: false }],
+    // OpenAI's OpenAPI declares `stream` as `nullable: true, default: false`,
+    // so an explicit null is a valid way to say "not streaming". Clients that
+    // serialize unset optionals as null do send it.
+    ['stream: null', { model: 'router/gemma4', messages: REQUEST.messages, stream: null }],
+  ];
+
+  for (const [label, payload] of NON_STREAMING_BODIES) {
+    it(`returns a single JSON completion when ${label}`, async () => {
+      stub = await StubUpstream.start((_req, respond) => {
+        respond.json(200, completionResponse('google/gemma-4-26b-a4b-it'));
+      });
+      const test = buildTestApp({ baseUrl: stub.baseUrl });
+      app = test.app;
+
+      const res = await app.inject({ method: 'POST', url: '/v1/chat/completions', payload });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toContain('application/json');
+      expect(res.headers['content-type']).not.toContain('text/event-stream');
+
+      const body = res.json();
+      expect(body.object).toBe('chat.completion');
+      expect(body.choices[0].message.content).toBe('Hello!');
+      expect(body.model).toBe('router/gemma4');
+
+      const access = test.logs.find((l) => l['message'] === 'chat_completion');
+      expect(access?.['stream']).toBe(false);
+    });
+  }
+
+  it('only an explicit stream: true switches to SSE', async () => {
+    stub = await StubUpstream.start(async (_req, respond) => {
+      await respond.sse(['data: [DONE]\n\n']);
+    });
+    const test = buildTestApp({ baseUrl: stub.baseUrl });
+    app = test.app;
+    await app.listen({ port: 0, host: '127.0.0.1' });
+
+    const address = app.server.address() as { port: number };
+    const res = await fetch(`http://127.0.0.1:${address.port}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...REQUEST, stream: true }),
+    });
+
+    expect(res.headers.get('content-type')).toContain('text/event-stream');
+    await res.text();
+  });
+
+  it('normalizes stream: null away before forwarding upstream', async () => {
+    // We accept null because OpenAI's spec allows it, but not every provider
+    // does — OpenRouter returns a 400 for it. Dropping the key sends the
+    // documented default rather than a value we know breaks backends.
+    stub = await StubUpstream.start((_req, respond) => {
+      respond.json(200, completionResponse('google/gemma-4-26b-a4b-it'));
+    });
+    const test = buildTestApp({ baseUrl: stub.baseUrl });
+    app = test.app;
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: { ...REQUEST, stream: null },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const forwarded = stub.requests[0]?.body as Record<string, unknown>;
+    expect('stream' in forwarded).toBe(false);
+  });
+
+  it('forwards the non-streaming intent to the upstream unchanged', async () => {
+    stub = await StubUpstream.start((_req, respond) => {
+      respond.json(200, completionResponse('google/gemma-4-26b-a4b-it'));
+    });
+    const test = buildTestApp({ baseUrl: stub.baseUrl });
+    app = test.app;
+
+    await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: { ...REQUEST, stream: false },
+    });
+
+    expect((stub.requests[0]?.body as Record<string, unknown>)['stream']).toBe(false);
+  });
+});
+
 describe('POST /v1/chat/completions — error handling', () => {
   it('returns 404 with an OpenAI error body for an unconfigured model', async () => {
     stub = await StubUpstream.start((_req, respond) => respond.json(200, {}));

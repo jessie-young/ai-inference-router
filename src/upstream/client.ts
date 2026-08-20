@@ -65,7 +65,17 @@ export function buildUpstreamBody(
   body: Record<string, unknown>,
   upstreamModel: string,
 ): Record<string, unknown> {
-  return { ...body, model: upstreamModel };
+  const upstreamBody: Record<string, unknown> = { ...body, model: upstreamModel };
+
+  // OpenAI's spec declares `stream` as nullable with a `false` default, so we
+  // accept an explicit null from clients. Not every provider is that lenient —
+  // OpenRouter rejects it with a 400 — so normalize it to the documented
+  // default rather than passing a value through that we know breaks backends.
+  if (upstreamBody['stream'] === null) {
+    delete upstreamBody['stream'];
+  }
+
+  return upstreamBody;
 }
 
 /** Copy client headers that are safe and useful to forward. */
